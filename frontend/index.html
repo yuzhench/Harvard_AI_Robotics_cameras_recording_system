@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RealSense Recording Pipeline</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f0f;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 16px;
+    }
+
+    h1 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #9ecaff;
+      margin-bottom: 10px;
+    }
+
+    /* ---- Stats bar ---- */
+    .stats-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .stat-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 5px;
+      padding: 5px 10px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: border-color 0.15s;
+      flex: 1 1 0;
+      min-width: 80px;
+    }
+
+    .stat-chip:hover { border-color: #3a5a7a; }
+
+    .stat-chip.active-task {
+      border-color: #e05555;
+      background: #1e1010;
+    }
+
+    .stat-chip-name {
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .stat-chip-count {
+      margin-left: auto;
+      font-weight: 700;
+      color: #9ecaff;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .stat-chip-dur {
+      font-size: 0.65rem;
+      color: #555;
+      white-space: nowrap;
+    }
+
+    .layout {
+      display: flex;
+      flex-direction: row;
+      gap: 0;
+      height: calc(100vh - 110px);
+      min-height: 500px;
+    }
+
+    .left-pane {
+      flex: 1 1 auto;
+      min-width: 300px;
+      overflow: hidden;
+      padding-right: 6px;
+    }
+
+    .divider {
+      width: 6px;
+      cursor: col-resize;
+      background: #1a1a1a;
+      border-left: 1px solid #2a2a2a;
+      border-right: 1px solid #2a2a2a;
+      flex: 0 0 6px;
+      position: relative;
+      transition: background 0.15s;
+      user-select: none;
+    }
+    .divider:hover, .divider.dragging { background: #3a5a7a; }
+    .divider::after {
+      content: '⋮';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #444;
+      font-size: 14px;
+    }
+
+    .right-pane {
+      flex: 0 0 320px;
+      min-width: 200px;
+      max-width: 600px;
+      overflow-y: auto;
+      padding-left: 6px;
+    }
+
+    /* ---- Camera grid (2x2) ---- */
+    .cameras-section {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .camera-grid {
+      flex: 1 1 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .camera-panel {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 0;
+    }
+
+    .camera-panel.active {
+      border-color: #3a5a7a;
+    }
+
+    .camera-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .camera-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #9ecaff;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .camera-panel:not(.active) .camera-label {
+      color: #444;
+    }
+
+    .cam-status-badge {
+      font-size: 0.65rem;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #2a4a2a;
+      color: #5c5;
+    }
+
+    .cam-status-badge.offline {
+      background: #2a2a2a;
+      color: #555;
+    }
+
+    canvas.cam-canvas {
+      width: 100%;
+      flex: 1 1 auto;
+      min-height: 0;
+      border-radius: 4px;
+      background: #000;
+      display: block;
+      object-fit: contain;
+    }
+
+    /* mode toggle */
+    .mode-toggle {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+    }
+
+    .mode-btn {
+      font-size: 0.65rem;
+      padding: 2px 8px;
+      border-radius: 3px;
+      border: 1px solid #333;
+      background: #111;
+      color: #555;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .mode-btn.active {
+      background: #1e3a5a;
+      border-color: #9ecaff;
+      color: #9ecaff;
+    }
+
+    .camera-panel:not(.active) .mode-btn {
+      opacity: 0.3;
+      pointer-events: none;
+    }
+
+    .cam-info {
+      font-size: 0.68rem;
+      color: #555;
+      line-height: 1.6;
+    }
+
+    .cam-info span { color: #888; }
+
+    /* ---- Right control panel ---- */
+    .control-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .card-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #555;
+      margin-bottom: 10px;
+    }
+
+    /* Clock */
+    #clock {
+      font-size: 1.6rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 300;
+      color: #9ecaff;
+      letter-spacing: 0.05em;
+    }
+
+    #date-display {
+      font-size: 0.75rem;
+      color: #555;
+      margin-top: 2px;
+    }
+
+    /* Recording status */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #333;
+      transition: background 0.3s;
+    }
+    .dot.recording { background: #e05555; animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    #rec-label { font-size: 0.85rem; color: #666; }
+    #rec-elapsed { font-size: 0.85rem; color: #888; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+    /* Inputs */
+    label {
+      display: block;
+      font-size: 0.72rem;
+      color: #666;
+      margin-bottom: 4px;
+    }
+
+    select, input[type="text"], textarea, input[type="number"] {
+      width: 100%;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 4px;
+      color: #ddd;
+      padding: 7px 9px;
+      font-size: 0.85rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    select:focus, input:focus, textarea:focus {
+      border-color: #9ecaff;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 70px;
+      font-family: inherit;
+    }
+
+    .row2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      padding: 10px;
+      border: none;
+      border-radius: 5px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+      letter-spacing: 0.03em;
+    }
+
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #btn-start {
+      background: #2a7a4a;
+      color: #fff;
+    }
+    #btn-start:not(:disabled):hover { background: #2e8c55; }
+
+    #btn-stop {
+      background: #7a2a2a;
+      color: #fff;
+    }
+    #btn-stop:not(:disabled):hover { background: #8e3333; }
+
+    /* Intrinsics */
+    .intrinsics-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 3px 12px;
+      font-size: 0.75rem;
+    }
+
+    .ikey { color: #555; }
+    .ival { color: #aaa; font-variant-numeric: tabular-nums; }
+
+    .card-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    /* Orientation 2x2 grid */
+    .orientation-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .orient-cell {
+      background: #111;
+      border: 1px solid #2a2a2a;
+      border-radius: 5px;
+      padding: 8px 10px;
+    }
+
+    .orient-cam-label {
+      font-size: 0.65rem;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+
+    .orient-values {
+      font-size: 0.78rem;
+      font-variant-numeric: tabular-nums;
+      color: #aaa;
+      line-height: 1.7;
+    }
+
+    .orient-values.offline {
+      color: #333;
+      font-size: 0.7rem;
+    }
+
+    .orient-val-label { color: #555; }
+    .orient-val-num   { color: #9ecaff; }
+
+    /* ---- Point-cloud modal ---- */
+    #pc-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.82);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pc-modal-inner {
+      background: #141414;
+      border: 1px solid #3a5a7a;
+      border-radius: 10px;
+      width: 88vw;
+      height: 88vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .pc-modal-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      border-bottom: 1px solid #222;
+      flex-shrink: 0;
+    }
+
+    #pc-modal-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #9ecaff;
+      flex: 1;
+    }
+
+    #pc-canvas {
+      flex: 1 1 auto;
+      width: 100%;
+      height: 0;         /* flex will size it */
+      display: block;
+      cursor: grab;
+    }
+    #pc-canvas:active { cursor: grabbing; }
+
+    #pc-footer {
+      flex-shrink: 0;
+      border-top: 1px solid #222;
+    }
+
+    .pc-density-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 14px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .pc-density-label {
+      font-size: 0.72rem;
+      color: #555;
+      white-space: nowrap;
+    }
+
+    #pc-stride-slider {
+      flex: 1;
+      accent-color: #3a7abd;
+      cursor: pointer;
+    }
+
+    #pc-density-val {
+      font-size: 0.72rem;
+      color: #9ecaff;
+      white-space: nowrap;
+      min-width: 110px;
+      text-align: right;
+    }
+
+    #pc-status {
+      font-size: 0.72rem;
+      color: #555;
+      padding: 5px 14px;
+    }
+
+    .pc-action-btn {
+      padding: 5px 13px;
+      border-radius: 4px;
+      border: 1px solid #3a5a7a;
+      background: #1e3a5a;
+      color: #9ecaff;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .pc-action-btn:hover { background: #2a4f76; }
+
+    .pc-close-btn {
+      padding: 5px 10px;
+      border-radius: 4px;
+      border: 1px solid #444;
+      background: #1e1e1e;
+      color: #888;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .pc-close-btn:hover { background: #2a2a2a; color: #ccc; }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #1e1e1e;
+      border: 1px solid #444;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      color: #ccc;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      z-index: 9999;
+    }
+    #toast.show { opacity: 1; }
+    #toast.error { border-color: #e05555; color: #f88; }
+    #toast.success { border-color: #2e8c55; color: #8ef; }
+  </style>
+</head>
+<body>
+
+<h1>RealSense Recording Pipeline</h1>
+
+<!-- Stats bar -->
+<div class="stats-bar" id="stats-bar">
+  <!-- chips injected by JS -->
+</div>
+
+<div class="layout">
+
+  <!-- Left pane: 2x2 camera grid -->
+  <div class="left-pane">
+    <div class="cameras-section">
+      <div class="camera-grid">
+
+        <!-- Camera 1 -->
+        <div class="camera-panel" id="panel-1">
+          <div class="camera-header">
+            <span class="camera-label">Camera 1</span>
+            <span class="cam-status-badge offline" id="badge-1">OFFLINE</span>
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="mode-rgb-1" onclick="setMode(1,'color')">RGB</button>
+              <button class="mode-btn" id="mode-depth-1" onclick="setMode(1,'depth')">Aligned Depth</button>
+              <button class="mode-btn" id="mode-pc-1" onclick="openPointCloud(1)">&#x2299; Cloud</button>
+            </div>
+          </div>
+          <canvas id="canvas-1" class="cam-canvas" width="640" height="480"></canvas>
+          <div class="cam-info" id="cam-info-1">—</div>
+        </div>
+
+        <!-- Camera 2 -->
+        <div class="camera-panel" id="panel-2">
+          <div class="camera-header">
+            <span class="camera-label">Camera 2</span>
+            <span class="cam-status-badge offline" id="badge-2">OFFLINE</span>
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="mode-rgb-2" onclick="setMode(2,'color')">RGB</button>
+              <button class="mode-btn" id="mode-depth-2" onclick="setMode(2,'depth')">Aligned Depth</button>
+              <button class="mode-btn" id="mode-pc-2" onclick="openPointCloud(2)">&#x2299; Cloud</button>
+            </div>
+          </div>
+          <canvas id="canvas-2" class="cam-canvas" width="640" height="480"></canvas>
+          <div class="cam-info" id="cam-info-2">—</div>
+        </div>
+
+        <!-- Camera 3 -->
+        <div class="camera-panel" id="panel-3">
+          <div class="camera-header">
+            <span class="camera-label">Camera 3</span>
+            <span class="cam-status-badge offline" id="badge-3">OFFLINE</span>
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="mode-rgb-3" onclick="setMode(3,'color')">RGB</button>
+              <button class="mode-btn" id="mode-depth-3" onclick="setMode(3,'depth')">Aligned Depth</button>
+              <button class="mode-btn" id="mode-pc-3" onclick="openPointCloud(3)">&#x2299; Cloud</button>
+            </div>
+          </div>
+          <canvas id="canvas-3" class="cam-canvas" width="640" height="480"></canvas>
+          <div class="cam-info" id="cam-info-3">—</div>
+        </div>
+
+        <!-- Camera 4 -->
+        <div class="camera-panel" id="panel-4">
+          <div class="camera-header">
+            <span class="camera-label">Camera 4</span>
+            <span class="cam-status-badge offline" id="badge-4">OFFLINE</span>
+            <div class="mode-toggle">
+              <button class="mode-btn active" id="mode-rgb-4" onclick="setMode(4,'color')">RGB</button>
+              <button class="mode-btn" id="mode-depth-4" onclick="setMode(4,'depth')">Aligned Depth</button>
+              <button class="mode-btn" id="mode-pc-4" onclick="openPointCloud(4)">&#x2299; Cloud</button>
+            </div>
+          </div>
+          <canvas id="canvas-4" class="cam-canvas" width="640" height="480"></canvas>
+          <div class="cam-info" id="cam-info-4">—</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Drag divider -->
+  <div class="divider" id="divider"></div>
+
+  <!-- Right pane: controls -->
+  <div class="right-pane" id="right-pane">
+  <!-- Right: controls -->
+  <div class="control-panel">
+
+    <!-- Clock -->
+    <div class="card">
+      <div class="card-title">Current Time</div>
+      <div id="clock">--:--:--</div>
+      <div id="date-display">----/--/--</div>
+      <div class="status-row">
+        <div class="dot" id="rec-dot"></div>
+        <span id="rec-label">Idle</span>
+        <span id="rec-elapsed"></span>
+      </div>
+    </div>
+
+    <!-- Task + prompt -->
+    <div class="card">
+      <div class="card-title">Session Setup</div>
+      <label>Task</label>
+      <select id="task-select"></select>
+
+      <label style="margin-top:10px">Text Prompt</label>
+      <textarea id="prompt-input" placeholder="Describe this demo…"></textarea>
+    </div>
+
+    <!-- Settings -->
+    <div class="card">
+      <div class="card-title">Camera Settings</div>
+      <div class="row2">
+        <div>
+          <label>FPS</label>
+          <input type="number" id="fps-input" value="30" min="1" max="90" />
+        </div>
+        <div>
+          <label>Resolution</label>
+          <select id="res-select">
+            <option value="640x480">640 × 480</option>
+            <option value="1280x720">1280 × 720</option>
+            <option value="848x480">848 × 480</option>
+            <option value="424x240">424 × 240</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="card">
+      <div class="card-title">Recording</div>
+      <div class="btn-row">
+        <button id="btn-start">▶ Start</button>
+        <button id="btn-stop" disabled>■ Stop</button>
+      </div>
+    </div>
+
+    <!-- Intrinsics -->
+    <div class="card">
+      <div class="card-title">Camera Intrinsics</div>
+      <div class="intrinsics-grid" id="intrinsics-grid">
+        <span class="ikey">—</span><span class="ival">Loading…</span>
+      </div>
+    </div>
+
+    <!-- Orientation (pitch / roll) -->
+    <div class="card">
+      <div class="card-title-row">
+        <span class="card-title" style="margin-bottom:0">Orientation — Pitch / Roll</span>
+        <span id="orient-live-indicator" style="font-size:0.7rem;color:#5c5;opacity:0.6">● live</span>
+      </div>
+      <div class="orientation-grid">
+        <div class="orient-cell" id="orient-1">
+          <div class="orient-cam-label">Camera 1</div>
+          <div class="orient-values offline">Loading…</div>
+        </div>
+        <div class="orient-cell" id="orient-2">
+          <div class="orient-cam-label">Camera 2</div>
+          <div class="orient-values offline">Loading…</div>
+        </div>
+        <div class="orient-cell" id="orient-3">
+          <div class="orient-cam-label">Camera 3</div>
+          <div class="orient-values offline">Loading…</div>
+        </div>
+        <div class="orient-cell" id="orient-4">
+          <div class="orient-cam-label">Camera 4</div>
+          <div class="orient-values offline">Loading…</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /right-pane -->
+</div>
+
+<!-- Point-cloud modal -->
+<div id="pc-modal">
+  <div class="pc-modal-inner">
+    <div class="pc-modal-header">
+      <span id="pc-modal-title">Point Cloud</span>
+      <button class="pc-action-btn" id="pc-capture-btn">&#x21BB; Capture</button>
+      <button class="pc-close-btn" id="pc-close-btn">&#x2715; Close</button>
+    </div>
+    <canvas id="pc-canvas"></canvas>
+    <div id="pc-footer">
+      <div class="pc-density-row">
+        <span class="pc-density-label">Low density</span>
+        <input type="range" id="pc-stride-slider" min="1" max="6" step="1" value="5">
+        <span class="pc-density-label">High</span>
+        <span id="pc-density-val">stride 2 · ~77K pts</span>
+      </div>
+      <div id="pc-status">Click Capture to snapshot a point cloud &nbsp;&#x2022;&nbsp; Drag to rotate &nbsp;&#x2022;&nbsp; Scroll to zoom</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ------------------------------------------------------------------ //
+// Utilities
+// ------------------------------------------------------------------ //
+function toast(msg, type = '') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(el._tid);
+  el._tid = setTimeout(() => el.className = '', 3000);
+}
+
+// ------------------------------------------------------------------ //
+// Clock
+// ------------------------------------------------------------------ //
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toTimeString().slice(0, 8);
+  document.getElementById('date-display').textContent =
+    now.toISOString().slice(0, 10).replace(/-/g, '/');
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ------------------------------------------------------------------ //
+// Draggable splitter
+// ------------------------------------------------------------------ //
+(function () {
+  const divider = document.getElementById('divider');
+  const rightPane = document.getElementById('right-pane');
+  const layout = divider.parentElement;
+  let dragging = false;
+
+  divider.addEventListener('mousedown', (e) => {
+    dragging = true;
+    divider.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = layout.getBoundingClientRect();
+    const totalWidth = rect.width - 6; // subtract divider width
+    const rightWidth = rect.right - e.clientX;
+    const clamped = Math.min(Math.max(rightWidth, 200), totalWidth - 300);
+    rightPane.style.flexBasis = clamped + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    divider.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
+
+// ------------------------------------------------------------------ //
+// Multi-camera WebSocket manager
+// ------------------------------------------------------------------ //
+
+// camModes[i] = 'color' | 'depth'
+const camModes = { 1: 'color', 2: 'color', 3: 'color', 4: 'color' };
+// wsMap[i] = WebSocket for camera i (only for active cameras)
+const wsMap = {};
+const wsTimers = {};
+
+function drawOffline(canvasEl, label) {
+  const c = canvasEl.getContext('2d');
+  c.fillStyle = '#0d0d0d';
+  c.fillRect(0, 0, canvasEl.width, canvasEl.height);
+  c.strokeStyle = '#2a2a2a';
+  c.lineWidth = 1;
+  for (let x = 0; x < canvasEl.width; x += 40) {
+    c.beginPath(); c.moveTo(x, 0); c.lineTo(x, canvasEl.height); c.stroke();
+  }
+  for (let y = 0; y < canvasEl.height; y += 40) {
+    c.beginPath(); c.moveTo(0, y); c.lineTo(canvasEl.width, y); c.stroke();
+  }
+  c.fillStyle = '#2a2a2a';
+  c.font = 'bold 14px monospace';
+  c.textAlign = 'center';
+  c.fillText('OFFLINE', canvasEl.width / 2, canvasEl.height / 2 - 10);
+  c.font = '11px monospace';
+  c.fillStyle = '#222';
+  c.fillText(label, canvasEl.width / 2, canvasEl.height / 2 + 12);
+}
+
+function connectCameraWS(camIdx, mode) {
+  const canvas = document.getElementById(`canvas-${camIdx}`);
+  if (!canvas) return;
+
+  // Close existing
+  const existing = wsMap[camIdx];
+  if (existing) { existing._noReconnect = true; existing.close(); }
+  clearTimeout(wsTimers[camIdx]);
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/stream?cam=${camIdx}&mode=${mode}`);
+  ws.binaryType = 'arraybuffer';
+  wsMap[camIdx] = ws;
+
+  const ctx = canvas.getContext('2d');
+
+  ws.onmessage = (e) => {
+    const blob = new Blob([e.data], { type: 'image/jpeg' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  };
+
+  ws.onclose = () => {
+    if (ws._noReconnect) return;
+    wsTimers[camIdx] = setTimeout(() => connectCameraWS(camIdx, camModes[camIdx]), 2000);
+  };
+}
+
+function setMode(camIdx, mode) {
+  if (camModes[camIdx] === mode) return;
+  camModes[camIdx] = mode;
+  document.getElementById(`mode-rgb-${camIdx}`)?.classList.toggle('active', mode === 'color');
+  document.getElementById(`mode-depth-${camIdx}`)?.classList.toggle('active', mode === 'depth');
+  // Reconnect with new mode only if camera is active
+  if (wsMap[camIdx]) connectCameraWS(camIdx, mode);
+}
+
+// Draw all 4 as offline initially; fetchStatus will activate the live ones
+[1, 2, 3, 4].forEach(i => {
+  drawOffline(document.getElementById(`canvas-${i}`), `Camera ${i} not connected`);
+});
+
+// Track which cameras are currently active
+let activeCameras = [];
+
+function applyActiveCameras(indices) {
+  for (let i = 1; i <= 4; i++) {
+    const panel = document.getElementById(`panel-${i}`);
+    const badge = document.getElementById(`badge-${i}`);
+    const infoEl = document.getElementById(`cam-info-${i}`);
+    const isActive = indices.includes(i);
+
+    if (panel) {
+      panel.classList.toggle('active', isActive);
+      // Enable/disable mode buttons
+      panel.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.style.pointerEvents = isActive ? '' : 'none';
+        btn.style.opacity = isActive ? '' : '0.3';
+      });
+    }
+
+    if (badge) {
+      badge.textContent = isActive ? 'LIVE' : 'OFFLINE';
+      badge.classList.toggle('offline', !isActive);
+    }
+
+    if (isActive && !activeCameras.includes(i)) {
+      // Newly active — start streaming
+      connectCameraWS(i, camModes[i]);
+    } else if (!isActive && activeCameras.includes(i)) {
+      // Went offline — close WS and draw offline
+      const ws = wsMap[i];
+      if (ws) { ws._noReconnect = true; ws.close(); delete wsMap[i]; }
+      drawOffline(document.getElementById(`canvas-${i}`), `Camera ${i} not connected`);
+      if (infoEl) infoEl.textContent = '—';
+    }
+  }
+  activeCameras = indices;
+}
+
+// ------------------------------------------------------------------ //
+// Status polling
+// ------------------------------------------------------------------ //
+let recStartTime = null;
+let recTimerInterval = null;
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/status');
+    const d = await r.json();
+
+    // Update camera panels based on which cameras are connected
+    applyActiveCameras(d.active_cameras || []);
+
+    // Update per-camera info text and intrinsics panel
+    const cameras = d.cameras || {};
+    for (const [idxStr, info] of Object.entries(cameras)) {
+      const idx = parseInt(idxStr);
+      _camIntrinsicsCache[idx] = info.intrinsics;   // cache for point-cloud viewer
+      const infoEl = document.getElementById(`cam-info-${idx}`);
+      if (infoEl) {
+        infoEl.innerHTML =
+          `<span>Name:</span> ${info.name} &nbsp;|&nbsp; <span>Serial:</span> ${info.serial} &nbsp;|&nbsp; <span>FPS:</span> ${d.fps} &nbsp;|&nbsp; <span>Res:</span> ${d.width}×${d.height}`;
+      }
+    }
+
+    // Show intrinsics for camera 1 (or first available)
+    const firstCam = cameras[d.active_cameras?.[0]];
+    if (firstCam) renderIntrinsics(firstCam.intrinsics);
+
+  } catch (_) {}
+}
+
+setInterval(fetchStatus, 2000);
+fetchStatus();
+
+// ------------------------------------------------------------------ //
+// Stats bar
+// ------------------------------------------------------------------ //
+let currentTaskForStats = null;
+
+async function fetchStats() {
+  try {
+    const r = await fetch('/stats');
+    const stats = await r.json();
+    renderStatsBar(stats);
+  } catch (_) {}
+}
+
+function renderStatsBar(stats) {
+  const bar = document.getElementById('stats-bar');
+  const activeTask = document.getElementById('task-select')?.value;
+  bar.innerHTML = '';
+
+  for (const [task, data] of Object.entries(stats)) {
+    const chip = document.createElement('div');
+    chip.className = 'stat-chip' + (task === activeTask && document.getElementById('btn-stop') && !document.getElementById('btn-stop').disabled ? ' active-task' : '');
+    chip.title = `Total: ${data.total_duration_s}s across ${data.count} demo(s)`;
+
+    const avgDur = data.count > 0
+      ? (data.total_duration_s / data.count).toFixed(1)
+      : '—';
+
+    chip.innerHTML = `
+      <span class="stat-chip-name">${task}</span>
+      <span class="stat-chip-dur">${avgDur}s avg</span>
+      <span class="stat-chip-count">${data.count}</span>
+    `;
+
+    // Click to select this task in the dropdown
+    chip.addEventListener('click', () => {
+      const sel = document.getElementById('task-select');
+      if (sel) sel.value = task;
+    });
+
+    bar.appendChild(chip);
+  }
+}
+
+setInterval(fetchStats, 5000);
+fetchStats();
+
+// ------------------------------------------------------------------ //
+// Orientation — real-time via WebSocket
+// ------------------------------------------------------------------ //
+function renderOrientation(data) {
+  for (let i = 1; i <= 4; i++) {
+    const cell = document.getElementById(`orient-${i}`);
+    if (!cell) continue;
+    const valEl = cell.querySelector('.orient-values');
+    const camData = data[String(i)];
+    if (!camData) {
+      valEl.className = 'orient-values offline';
+      valEl.textContent = 'OFFLINE';
+    } else if (!camData.available) {
+      valEl.className = 'orient-values offline';
+      valEl.textContent = camData.reason || 'IMU unavailable';
+    } else {
+      const p  = camData.pitch;
+      const r2 = camData.roll;
+      valEl.className = 'orient-values';
+      valEl.innerHTML =
+        `<span class="orient-val-label">Pitch</span> <span class="orient-val-num">${(p  >= 0 ? '+' : '') + p.toFixed(1)  + '°'}</span><br>` +
+        `<span class="orient-val-label">Roll &nbsp;</span> <span class="orient-val-num">${(r2 >= 0 ? '+' : '') + r2.toFixed(1) + '°'}</span>`;
+    }
+  }
+}
+
+function connectOrientationWS() {
+  const ind = document.getElementById('orient-live-indicator');
+  const ws = new WebSocket(`ws://${location.host}/ws/orientation`);
+  ws.onmessage = e => {
+    const data = JSON.parse(e.data);
+    renderOrientation(data);
+  };
+  ws.onopen = () => { if (ind) ind.style.opacity = '1'; };
+  ws.onclose = () => {
+    if (ind) ind.style.opacity = '0.3';
+    setTimeout(connectOrientationWS, 2000);  // auto-reconnect
+  };
+}
+connectOrientationWS();
+
+function renderIntrinsics(intr) {
+  const grid = document.getElementById('intrinsics-grid');
+  if (!intr || !intr.color) { return; }
+  const c = intr.color;
+  const dep = intr.depth;
+  grid.innerHTML = `
+    <span class="ikey">fx / fy</span><span class="ival">${c.fx?.toFixed(2)} / ${c.fy?.toFixed(2)}</span>
+    <span class="ikey">cx / cy</span><span class="ival">${c.ppx?.toFixed(2)} / ${c.ppy?.toFixed(2)}</span>
+    <span class="ikey">Distortion</span><span class="ival">${c.distortion_model}</span>
+    <span class="ikey">Coeffs</span><span class="ival">${c.coeffs?.map(v => v.toFixed(4)).join(', ')}</span>
+    <span class="ikey">Depth scale</span><span class="ival">${dep?.depth_scale} m/unit</span>
+    <span class="ikey">Serial</span><span class="ival">${intr.serial}</span>
+  `;
+}
+
+// ------------------------------------------------------------------ //
+// Recording elapsed timer
+// ------------------------------------------------------------------ //
+function startElapsedTimer() {
+  recStartTime = Date.now();
+  recTimerInterval = setInterval(() => {
+    const s = Math.floor((Date.now() - recStartTime) / 1000);
+    const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    document.getElementById('rec-elapsed').textContent = `${hh}:${mm}:${ss}`;
+  }, 1000);
+}
+
+function stopElapsedTimer() {
+  clearInterval(recTimerInterval);
+  recTimerInterval = null;
+  recStartTime = null;
+  document.getElementById('rec-elapsed').textContent = '';
+}
+
+// ------------------------------------------------------------------ //
+// Load tasks
+// ------------------------------------------------------------------ //
+async function loadTasks() {
+  const r = await fetch('/tasks');
+  const d = await r.json();
+  const sel = document.getElementById('task-select');
+  sel.innerHTML = '';
+  for (const t of d.tasks) {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t.replace(/_/g, ' ');
+    sel.appendChild(opt);
+  }
+}
+loadTasks();
+
+// ------------------------------------------------------------------ //
+// Start / Stop
+// ------------------------------------------------------------------ //
+document.getElementById('btn-start').addEventListener('click', async () => {
+  const task = document.getElementById('task-select').value;
+  const prompt = document.getElementById('prompt-input').value.trim();
+
+  if (!prompt) { toast('Please enter a text prompt.', 'error'); return; }
+
+  try {
+    const r = await fetch('/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, prompt }),
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.detail || 'Error', 'error'); return; }
+
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-stop').disabled = false;
+    document.getElementById('rec-dot').classList.add('recording');
+    document.getElementById('rec-label').textContent = 'Recording';
+    startElapsedTimer();
+    toast('Recording started — ' + task, 'success');
+  } catch (e) {
+    toast('Connection error', 'error');
+  }
+});
+
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  // Immediate visual feedback — don't wait for the server
+  const btnStop  = document.getElementById('btn-stop');
+  const btnStart = document.getElementById('btn-start');
+  const recDot   = document.getElementById('rec-dot');
+  const recLabel = document.getElementById('rec-label');
+
+  btnStop.disabled = true;
+  btnStop.textContent = '⏳ Saving…';
+  recDot.classList.remove('recording');
+  recLabel.textContent = 'Saving…';
+  stopElapsedTimer();
+
+  try {
+    const r = await fetch('/stop', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      // Restore stop button so user can retry
+      btnStop.disabled = false;
+      btnStop.textContent = '■ Stop';
+      recDot.classList.add('recording');
+      recLabel.textContent = 'Recording';
+      toast(d.detail || 'Stop failed', 'error');
+      return;
+    }
+
+    btnStart.disabled = false;
+    btnStop.textContent = '■ Stop';
+    recLabel.textContent = 'Idle';
+    toast(`Saved — ${d.elapsed_seconds}s`, 'success');
+    fetchStats();
+  } catch (e) {
+    btnStop.disabled = false;
+    btnStop.textContent = '■ Stop';
+    recDot.classList.add('recording');
+    recLabel.textContent = 'Recording';
+    toast('Connection error', 'error');
+  }
+});
+
+// ================================================================= //
+// Point-cloud viewer (pure WebGL, no external libraries)
+// ================================================================= //
+
+// Intrinsics cache — populated by fetchStatus() every 2 s
+const _camIntrinsicsCache = {};
+
+// GLSL shaders ----------------------------------------------------- //
+const PC_VS = `
+  attribute vec3 a_pos;
+  attribute vec3 a_col;
+  uniform mat4 u_proj;
+  uniform mat4 u_view;
+  varying vec3 v_col;
+  void main() {
+    // RealSense frame: X right, Y down, Z forward
+    // Display frame:   X right, Y up,   Z backward  (standard WebGL)
+    vec3 p = vec3(a_pos.x, -a_pos.y, -a_pos.z);
+    vec4 vp = u_view * vec4(p, 1.0);
+    gl_Position = u_proj * vp;
+    // Attenuate point size by depth; clamp so distant points stay visible
+    gl_PointSize = clamp(4.0 / length(vp.xyz), 1.0, 6.0);
+    v_col = a_col;   // already normalised to [0,1] by vertexAttribPointer
+  }
+`;
+
+const PC_FS = `
+  precision mediump float;
+  varying vec3 v_col;
+  uniform int u_line;
+  void main() {
+    if (u_line == 0) {
+      vec2 d = gl_PointCoord - 0.5;
+      if (dot(d, d) > 0.25) discard;   // circular splat for points
+    }
+    gl_FragColor = vec4(v_col, 1.0);
+  }
+`;
+
+// Matrix helpers (column-major, WebGL convention) ------------------ //
+function _m4persp(fov, aspect, near, far) {
+  const f = 1.0 / Math.tan(fov / 2);
+  return new Float32Array([
+    f / aspect, 0,  0,                           0,
+    0,          f,  0,                           0,
+    0,          0,  (far + near) / (near - far), -1,
+    0,          0,  2 * near * far / (near - far), 0,
+  ]);
+}
+
+function _m4lookAt(eye, center, up) {
+  let fx = center[0]-eye[0], fy = center[1]-eye[1], fz = center[2]-eye[2];
+  let fl = Math.sqrt(fx*fx + fy*fy + fz*fz);
+  fx /= fl; fy /= fl; fz /= fl;
+  // s = f × up
+  let sx = fy*up[2]-fz*up[1], sy = fz*up[0]-fx*up[2], sz = fx*up[1]-fy*up[0];
+  let sl = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  sx /= sl; sy /= sl; sz /= sl;
+  // u = s × f
+  const ux = sy*fz - sz*fy, uy = sz*fx - sx*fz, uz = sx*fy - sy*fx;
+  const dot = (ax,ay,az,bx,by,bz) => ax*bx + ay*by + az*bz;
+  return new Float32Array([
+    sx, ux, -fx, 0,
+    sy, uy, -fy, 0,
+    sz, uz, -fz, 0,
+    -dot(sx,sy,sz,eye[0],eye[1],eye[2]),
+    -dot(ux,uy,uz,eye[0],eye[1],eye[2]),
+     dot(fx,fy,fz,eye[0],eye[1],eye[2]),
+    1,
+  ]);
+}
+
+// Viewer state ----------------------------------------------------- //
+let _pcGL       = null;   // WebGL context
+let _pcProg     = null;   // shader program
+let _pcPosBuf   = null;
+let _pcColBuf   = null;
+let _pcLocs     = {};     // cached attribute/uniform locations
+let _pcN        = 0;      // number of points
+let _pcCenter   = [0, 0, -1.5];  // orbit pivot (display coords)
+let _pcTheta    = 0.25;   // azimuth
+let _pcPhi      = 1.1;    // polar (0 = top, PI/2 = equator)
+let _pcDist     = 3.0;    // orbit radius
+let _pcCam      = 1;      // which camera
+let _pcDrag     = false;
+let _pcMx = 0, _pcMy = 0;
+// Camera overlay (axes + frustum)
+let _pcOverlayPosBuf = null;
+let _pcOverlayColBuf = null;
+let _pcOverlayN      = 0;
+let _pcGLVersion     = 'WebGL';
+
+// Init WebGL ------------------------------------------------------- //
+function _pcInitGL(canvas) {
+  const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  if (!gl) { console.error('WebGL unavailable'); return false; }
+  _pcGLVersion = gl.getParameter(gl.VERSION);   // e.g. "WebGL 2.0 (OpenGL ES 3.0 ...)"
+
+  function compileShader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      console.error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compileShader(gl.VERTEX_SHADER,   PC_VS));
+  gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, PC_FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog)); return false;
+  }
+
+  _pcGL   = gl;
+  _pcProg = prog;
+  _pcLocs = {
+    uProj: gl.getUniformLocation(prog, 'u_proj'),
+    uView: gl.getUniformLocation(prog, 'u_view'),
+    uLine: gl.getUniformLocation(prog, 'u_line'),
+    aPos:  gl.getAttribLocation(prog,  'a_pos'),
+    aCol:  gl.getAttribLocation(prog,  'a_col'),
+  };
+  _pcPosBuf        = gl.createBuffer();
+  _pcColBuf        = gl.createBuffer();
+  _pcOverlayPosBuf = gl.createBuffer();
+  _pcOverlayColBuf = gl.createBuffer();
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0.06, 0.06, 0.06, 1.0);
+
+  // Mouse orbit
+  canvas.addEventListener('mousedown', e => {
+    _pcDrag = true; _pcMx = e.clientX; _pcMy = e.clientY; e.preventDefault();
+  });
+  canvas.addEventListener('mousemove', e => {
+    if (!_pcDrag) return;
+    _pcTheta -= (e.clientX - _pcMx) * 0.006;
+    _pcPhi    = Math.max(0.05, Math.min(Math.PI - 0.05, _pcPhi - (e.clientY - _pcMy) * 0.006));
+    _pcMx = e.clientX; _pcMy = e.clientY;
+  });
+  canvas.addEventListener('mouseup',    () => _pcDrag = false);
+  canvas.addEventListener('mouseleave', () => _pcDrag = false);
+  canvas.addEventListener('wheel', e => {
+    _pcDist = Math.max(0.1, Math.min(20, _pcDist * (1 + e.deltaY * 0.001)));
+    e.preventDefault();
+  }, { passive: false });
+
+  // Touch orbit + pinch-zoom
+  let _t0x = 0, _t0y = 0, _tDist = 0;
+  canvas.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { _t0x = e.touches[0].clientX; _t0y = e.touches[0].clientY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      _tDist = Math.hypot(dx, dy);
+    }
+    e.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    if (e.touches.length === 1) {
+      const dx = e.touches[0].clientX - _t0x, dy = e.touches[0].clientY - _t0y;
+      _pcTheta -= dx * 0.006;
+      _pcPhi = Math.max(0.05, Math.min(Math.PI - 0.05, _pcPhi - dy * 0.006));
+      _t0x = e.touches[0].clientX; _t0y = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.hypot(dx, dy);
+      _pcDist = Math.max(0.1, Math.min(20, _pcDist * (_tDist / d)));
+      _tDist = d;
+    }
+    e.preventDefault();
+  }, { passive: false });
+
+  // Continuous render loop
+  (function loop() {
+    _pcRenderFrame();
+    requestAnimationFrame(loop);
+  })();
+
+  return true;
+}
+
+// Render one frame ------------------------------------------------- //
+function _pcRenderFrame() {
+  const modal = document.getElementById('pc-modal');
+  if (!_pcGL || modal.style.display !== 'flex') return;
+
+  const gl = _pcGL;
+  const canvas = gl.canvas;
+
+  // Sync canvas pixel size to CSS layout size
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+    canvas.width = w; canvas.height = h;
+  }
+  if (canvas.width === 0 || canvas.height === 0) return;
+
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (_pcN === 0) return;
+
+  // Build MVP
+  const aspect = canvas.width / canvas.height;
+  const proj   = _m4persp(Math.PI / 4, aspect, 0.01, 100.0);
+  const sp = Math.sin(_pcPhi), cp = Math.cos(_pcPhi);
+  const st = Math.sin(_pcTheta), ct = Math.cos(_pcTheta);
+  const eye = [
+    _pcCenter[0] + _pcDist * sp * st,
+    _pcCenter[1] + _pcDist * cp,
+    _pcCenter[2] + _pcDist * sp * ct,
+  ];
+  const view = _m4lookAt(eye, _pcCenter, [0, 1, 0]);
+
+  gl.useProgram(_pcProg);
+  gl.uniformMatrix4fv(_pcLocs.uProj, false, proj);
+  gl.uniformMatrix4fv(_pcLocs.uView, false, view);
+
+  // XYZ
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcPosBuf);
+  gl.vertexAttribPointer(_pcLocs.aPos, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(_pcLocs.aPos);
+
+  // RGB (uint8, normalised to [0,1] in shader)
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcColBuf);
+  gl.vertexAttribPointer(_pcLocs.aCol, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.enableVertexAttribArray(_pcLocs.aCol);
+
+  gl.uniform1i(_pcLocs.uLine, 0);
+  gl.drawArrays(gl.POINTS, 0, _pcN);
+
+  // --- camera overlay: axes + frustum wireframe ---
+  if (_pcOverlayN > 0) {
+    gl.uniform1i(_pcLocs.uLine, 1);   // disable point-splat discard
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, _pcOverlayPosBuf);
+    gl.vertexAttribPointer(_pcLocs.aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(_pcLocs.aPos);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, _pcOverlayColBuf);
+    gl.vertexAttribPointer(_pcLocs.aCol, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.enableVertexAttribArray(_pcLocs.aCol);
+
+    gl.drawArrays(gl.LINES, 0, _pcOverlayN);
+  }
+}
+
+// Load new point cloud data into GPU buffers ----------------------- //
+function _pcLoadData(xyz, rgb) {
+  const gl = _pcGL;
+  const N  = xyz.length / 3;
+
+  // Compute display-space centroid (Y and Z are flipped in shader)
+  let sx = 0, sy = 0, sz = 0;
+  for (let i = 0; i < N; i++) {
+    sx += xyz[i * 3];
+    sy += -xyz[i * 3 + 1];
+    sz += -xyz[i * 3 + 2];
+  }
+  _pcCenter = [sx / N, sy / N, sz / N];
+  // Orbit radius: just beyond the scene
+  _pcDist = Math.abs(_pcCenter[2]) * 1.5 + 1.0;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcPosBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, xyz, gl.STATIC_DRAW);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcColBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, rgb, gl.STATIC_DRAW);
+
+  _pcN = N;
+}
+
+// Build camera overlay geometry (axes + sensor body + frustum) ----- //
+// All coordinates in RealSense frame: X right, Y down, Z forward.
+// The vertex shader flips Y and Z, so in screen space:
+//   X axis → points right    (red)
+//   Y axis → points down     (green)   display-up after flip
+//   Z axis → points away     (blue)    display-into-screen after flip
+function _pcBuildOverlay(intrinsics) {
+  const ci = (intrinsics && intrinsics.color)
+    ? intrinsics.color
+    : { fx: 600, fy: 600, ppx: 320, ppy: 240, width: 640, height: 480 };
+
+  const fx = ci.fx, fy = ci.fy, cx = ci.ppx, cy = ci.ppy;
+  const W  = ci.width  || 640;
+  const H  = ci.height || 480;
+  const L  = 0.10;    // axis arm length (metres)
+  const D  = 0.30;    // frustum near-plane depth shown (metres)
+  const BW = 0.030;   // camera body half-width  (~D435 sensor area)
+  const BH = 0.018;   // camera body half-height
+
+  // Frustum corners at depth D (RealSense coords)
+  const tl = [(0 - cx) * D / fx, (0 - cy) * D / fy, D];
+  const tr = [(W - cx) * D / fx, (0 - cy) * D / fy, D];
+  const br = [(W - cx) * D / fx, (H - cy) * D / fy, D];
+  const bl = [(0 - cx) * D / fx, (H - cy) * D / fy, D];
+
+  // Each row: [x, y, z,  r, g, b]  — one vertex per row, pairs = line segments
+  const V = [
+    // ---- Coordinate axes ----
+    // X axis (red)
+    [0, 0, 0,     220, 55,  55],  [L, 0, 0,     220, 55,  55],
+    // Y axis (green) — points down in RealSense → down in display (pre-flip)
+    [0, 0, 0,     55, 210,  75],  [0, L, 0,     55, 210,  75],
+    // Z axis (cyan-blue) — points into scene
+    [0, 0, 0,     55, 140, 255],  [0, 0, L,     55, 140, 255],
+
+    // ---- Camera sensor body (small rectangle at z=0 plane) ----
+    [-BW,-BH, 0,  200, 200, 200], [ BW,-BH, 0,  200, 200, 200],
+    [ BW,-BH, 0,  200, 200, 200], [ BW, BH, 0,  200, 200, 200],
+    [ BW, BH, 0,  200, 200, 200], [-BW, BH, 0,  200, 200, 200],
+    [-BW, BH, 0,  200, 200, 200], [-BW,-BH, 0,  200, 200, 200],
+
+    // ---- Frustum rays: origin → each corner ----
+    [0,0,0, 130,130,130], [...tl, 130,130,130],
+    [0,0,0, 130,130,130], [...tr, 130,130,130],
+    [0,0,0, 130,130,130], [...br, 130,130,130],
+    [0,0,0, 130,130,130], [...bl, 130,130,130],
+
+    // ---- Frustum near rectangle ----
+    [...tl, 180,180,180], [...tr, 180,180,180],
+    [...tr, 180,180,180], [...br, 180,180,180],
+    [...br, 180,180,180], [...bl, 180,180,180],
+    [...bl, 180,180,180], [...tl, 180,180,180],
+  ];
+
+  const N   = V.length;
+  const pos = new Float32Array(N * 3);
+  const col = new Uint8Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    pos[i*3]   = V[i][0]; pos[i*3+1] = V[i][1]; pos[i*3+2] = V[i][2];
+    col[i*3]   = V[i][3]; col[i*3+1] = V[i][4]; col[i*3+2] = V[i][5];
+  }
+
+  const gl = _pcGL;
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcOverlayPosBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, _pcOverlayColBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, col, gl.STATIC_DRAW);
+  _pcOverlayN = N;
+}
+
+// Slider: value 1–6 maps to stride 6–1 (left=low density, right=high density)
+function _pcStrideFromSlider() {
+  return 7 - parseInt(document.getElementById('pc-stride-slider').value);
+}
+
+function _pcUpdateDensityLabel() {
+  const stride = _pcStrideFromSlider();
+  const W = 640, H = 480;   // conservative estimate; actual res may differ
+  const approx = Math.round((W / stride) * (H / stride));
+  const label  = approx >= 1000 ? `~${Math.round(approx / 1000)}K pts` : `~${approx} pts`;
+  document.getElementById('pc-density-val').textContent = `stride ${stride} · ${label}`;
+}
+
+// Fetch + display -------------------------------------------------- //
+async function _pcFetch() {
+  const statusEl = document.getElementById('pc-status');
+  statusEl.textContent = 'Loading point cloud…';
+  const stride = _pcStrideFromSlider();
+  try {
+    const r = await fetch(`/pointcloud?cam=${_pcCam}&stride=${stride}`);
+    if (!r.ok) { statusEl.textContent = `Error ${r.status}`; return; }
+    const buf = await r.arrayBuffer();
+    const N   = new DataView(buf).getUint32(0, true);
+    const xyz = new Float32Array(buf, 4,          N * 3);
+    const rgb = new Uint8Array  (buf, 4 + N * 12, N * 3);
+    _pcLoadData(xyz, rgb);
+    _pcBuildOverlay(_camIntrinsicsCache[_pcCam]);
+    statusEl.textContent =
+      `${N.toLocaleString()} pts \u2022 Drag to rotate \u2022 Scroll to zoom \u2022 ${_pcGLVersion}`;
+  } catch (e) {
+    document.getElementById('pc-status').textContent = 'Fetch error: ' + e.message;
+  }
+}
+
+// Auto-recapture when density slider changes (debounced 400 ms)
+let _pcSliderTimer = null;
+document.getElementById('pc-stride-slider').addEventListener('input', () => {
+  _pcUpdateDensityLabel();
+  clearTimeout(_pcSliderTimer);
+  _pcSliderTimer = setTimeout(_pcFetch, 400);
+});
+
+// Public: open modal for a given camera index ---------------------- //
+function openPointCloud(camIdx) {
+  _pcCam = camIdx;
+  const modal  = document.getElementById('pc-modal');
+  modal.style.display = 'flex';
+  document.getElementById('pc-modal-title').textContent =
+    `Point Cloud \u2014 Camera ${camIdx}`;
+
+  const canvas = document.getElementById('pc-canvas');
+  if (!_pcGL) _pcInitGL(canvas);
+
+  _pcUpdateDensityLabel();
+  _pcFetch();
+}
+
+document.getElementById('pc-capture-btn').addEventListener('click', _pcFetch);
+document.getElementById('pc-close-btn').addEventListener('click', () => {
+  document.getElementById('pc-modal').style.display = 'none';
+});
+</script>
+</body>
+</html>
