@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from .config import TASKS, DEFAULT_FPS, DEFAULT_WIDTH, DEFAULT_HEIGHT, DATA_ROOT
 from .camera import CameraManager
 from .recorder import Recorder
-from .utility import load_stats, save_stats, rebuild_stats_from_disk, enumerate_cameras, get_all_orientations, make_pointcloud
+from .utility import load_stats, save_stats, rebuild_stats_from_disk, enumerate_cameras, get_all_orientations, make_pointcloud, trim_session
 
 # ---------------------------------------------------------------------------
 # App state
@@ -339,6 +339,18 @@ async def stop_recording():
                     timestamps=timestamps,
                 )
             results[f"cam{cam_idx}"] = info
+
+        # Auto-trim: strip still lead-in/lead-out from all cameras.
+        # Raw files are kept as rgb_raw.mp4 / depth_raw.npz.
+        print("[Server] Auto-trimming session...")
+        try:
+            trim_results = trim_session(session_dir_snap)
+            for cam_name, trim_info in trim_results.items():
+                if cam_name in results and "error" not in trim_info:
+                    results[cam_name]["trim"] = trim_info
+        except Exception as e:
+            print(f"[Server] trim_session failed: {e}")
+
         return results
 
     loop = asyncio.get_event_loop()
