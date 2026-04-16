@@ -404,6 +404,13 @@ class CameraManager:
             self.cameras[1] = cam
             return
 
+        # Stagger pipeline.start() calls to avoid simultaneous USB bandwidth
+        # negotiation. When N RealSense cameras come up at the same instant,
+        # the kernel's USB scheduler can under-allocate bandwidth to some of
+        # them, dropping them to reduced fps / USB 2.0 mode. Sleeping between
+        # starts lets each device finish its SuperSpeed isoc negotiation and
+        # lock in its slot before the next one starts.
+        STARTUP_STAGGER_S = 1.0
         for i, device in enumerate(devices, start=1):
             serial = device.get_info(rs.camera_info.serial_number)
             name = device.get_info(rs.camera_info.name)
@@ -414,6 +421,9 @@ class CameraManager:
                 print(f"[CameraManager] cam{i}: {name} (serial {serial}) started")
             except Exception as e:
                 print(f"[CameraManager] cam{i}: failed to start {name} ({serial}): {e}")
+            # Give the USB stack time to settle before starting the next one.
+            if i < len(devices):
+                time.sleep(STARTUP_STAGGER_S)
 
     def get(self, idx: int):
         return self.cameras.get(idx)

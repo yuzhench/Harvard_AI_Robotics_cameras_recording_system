@@ -8,6 +8,7 @@ multiple Recorder instances (one per camera).
 
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -17,12 +18,16 @@ import numpy as np
 class Recorder:
     """Saves RGB (MP4) + Depth (NPZ) + intrinsics for a single camera."""
 
+    # Sliding-window size for live FPS (seconds of history kept).
+    _FPS_WINDOW_S = 1.0
+
     def __init__(self):
         self._lock = threading.Lock()
         self._recording = False
         self._video_writer: cv2.VideoWriter | None = None
         self._depth_frames: list[np.ndarray] = []
         self._depth_timestamps: list[float] = []
+        self._fps_window: deque[float] = deque()   # recent frame timestamps
         self._start_time: float = 0.0
         self._frame_count: int = 0
 
@@ -47,6 +52,7 @@ class Recorder:
             )
             self._depth_frames = []
             self._depth_timestamps = []
+            self._fps_window.clear()
             self._start_time = time.time()
             self._frame_count = 0
             self._recording = True
@@ -59,6 +65,12 @@ class Recorder:
             self._depth_frames.append(depth_mm.copy())
             self._depth_timestamps.append(timestamp)
             self._frame_count += 1
+            # Sliding-window FPS: drop entries older than the window, then
+            # append the current frame timestamp.
+            cutoff = timestamp - self._FPS_WINDOW_S
+            while self._fps_window and self._fps_window[0] < cutoff:
+                self._fps_window.popleft()
+            self._fps_window.append(timestamp)
 
     def stop(self) -> dict:
         """Stop recording, flush files, return info dict."""
@@ -101,3 +113,15 @@ class Recorder:
     @property
     def frame_count(self) -> int:
         return self._frame_count
+
+    @property
+    def recent_fps(self) -> float:
+        """Frames written during the last _FPS_WINDOW_S seconds (sliding)."""
+        if not self._recording:
+            return 0.0
+        cutoff = time.time() - self._FPS_WINDOW_S
+        with self._lock:
+            while self._fps_window and self._fps_window[0] < cutoff:
+                self._fps_window.popleft()
+            count = len(self._fps_window)
+        return float(count) / self._FPS_WINDOW_S

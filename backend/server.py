@@ -13,15 +13,53 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import requests
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
-from .config import TASKS, DEFAULT_FPS, DEFAULT_WIDTH, DEFAULT_HEIGHT, DATA_ROOT
+from .config import (
+    TASKS, DEFAULT_FPS, DEFAULT_WIDTH, DEFAULT_HEIGHT, DATA_ROOT,
+    JETSON_URL, JETSON_TIMEOUT_S,
+)
 from .camera import CameraManager
 from .recorder import Recorder
-from .utility import load_stats, save_stats, rebuild_stats_from_disk, enumerate_cameras, get_all_orientations, make_pointcloud, trim_session
+from .utility import load_stats, save_stats, rebuild_stats_from_disk, enumerate_cameras, get_all_orientations, make_pointcloud
+
+
+# ---------------------------------------------------------------------------
+# Jetson record-daemon forwarding helpers
+# ---------------------------------------------------------------------------
+# If JETSON_URL is non-empty, POST /start and POST /stop are mirrored to the
+# Jetson daemon so the robot and cameras record as a single session.
+# Blocking `requests` calls are wrapped in run_in_executor to keep the
+# FastAPI event loop responsive.
+
+def _jetson_enabled() -> bool:
+    return bool(JETSON_URL)
+
+
+def _jetson_post(path: str, json_body: Optional[dict] = None) -> tuple[int, dict]:
+    """Blocking POST to the Jetson daemon. Call via run_in_executor."""
+    try:
+        r = requests.post(
+            f"{JETSON_URL}{path}",
+            json=json_body,
+            timeout=JETSON_TIMEOUT_S,
+        )
+    except requests.RequestException as e:
+        return -1, {"error": f"Jetson unreachable: {e}"}
+    try:
+        body = r.json()
+    except Exception:
+        body = {"text": r.text}
+    return r.status_code, body
+
+
+async def _jetson_post_async(path: str, json_body: Optional[dict] = None) -> tuple[int, dict]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _jetson_post, path, json_body)
 
 # ---------------------------------------------------------------------------
 # App state
@@ -40,6 +78,7 @@ _session_task: str = ""
 _session_prompt: str = ""
 _session_start: float = 0.0
 _session_active: bool = False
+_session_used_jetson: bool = False   # True iff the current session started Jetson
 
 current_fps = DEFAULT_FPS
 current_width = DEFAULT_WIDTH
@@ -181,11 +220,38 @@ async def get_tasks():
     return {"tasks": TASKS}
 
 
+@app.get("/jetson/status")
+async def get_jetson_status():
+    """Proxy the Jetson record daemon's /status so the frontend can poll it
+    same-origin without CORS concerns. Returns {"enabled": bool, ...}."""
+    if not _jetson_enabled():
+        return {"enabled": False, "reachable": False, "detail": "JETSON_URL unset"}
+    loop = asyncio.get_event_loop()
+    try:
+        r = await loop.run_in_executor(
+            None,
+            lambda: requests.get(f"{JETSON_URL}/status", timeout=JETSON_TIMEOUT_S),
+        )
+        data = r.json()
+    except requests.RequestException as e:
+        return {"enabled": True, "reachable": False, "detail": str(e)}
+    except Exception as e:
+        return {"enabled": True, "reachable": False, "detail": f"parse error: {e}"}
+    return {"enabled": True, "reachable": True, **data}
+
+
 @app.get("/status")
 async def get_status():
     recording = _session_active
     elapsed = round(time.time() - _session_start, 1) if _session_active else 0.0
     total_frames = sum(r.frame_count for r in _recorders.values())
+
+    # Live per-camera fps (sliding 1s window). Zero when not recording.
+    live_fps = {
+        str(idx): round(_recorders[idx].recent_fps, 1)
+        for idx in camera_manager.indices
+        if idx in _recorders
+    }
 
     return {
         "recording": recording,
@@ -196,6 +262,8 @@ async def get_status():
         "height": current_height,
         "active_cameras": camera_manager.indices,
         "cameras": camera_manager.info(),
+        "live_fps": live_fps,
+        "used_jetson": _session_used_jetson,
     }
 
 
@@ -267,11 +335,19 @@ async def get_pointcloud(cam: int = 1, stride: int = 3):
 class StartRequest(BaseModel):
     task: str
     prompt: str
+    # Optional per-session override for the local camera data root.
+    # If omitted or empty, falls back to DATA_ROOT from config.py.
+    # Jetson's DATA_ROOT is fixed at daemon-startup time and unaffected.
+    data_root: Optional[str] = None
+    # Per-session opt-out of Jetson forwarding, even if JETSON_URL is set.
+    # True (default) = record cameras + robot; False = record cameras only.
+    use_jetson: bool = True
 
 
 @app.post("/start")
 async def start_recording(req: StartRequest):
-    global _session_dir, _session_task, _session_prompt, _session_start, _session_active
+    global _session_dir, _session_task, _session_prompt, _session_start
+    global _session_active, _session_used_jetson
 
     if req.task not in TASKS:
         raise HTTPException(status_code=400, detail=f"Unknown task: {req.task}")
@@ -280,23 +356,56 @@ async def start_recording(req: StartRequest):
     if camera_manager.count == 0:
         raise HTTPException(status_code=503, detail="No cameras available")
 
+    # --- Step 1: ask the Jetson daemon to start first (fail fast) -----------
+    # Forward to Jetson only if both the server-level URL is configured AND
+    # the caller opted in via use_jetson (default True).
+    jetson_session = None
+    forward_jetson = _jetson_enabled() and req.use_jetson
+    if forward_jetson:
+        code, body = await _jetson_post_async(
+            "/start", {"task": req.task, "prompt": req.prompt}
+        )
+        if code != 200:
+            # Don't touch local state — nothing started yet.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Jetson /start failed (HTTP {code}): {body}",
+            )
+        jetson_session = body.get("session_dir")
+
+    # --- Step 2: prepare session dir + start local camera recorders --------
+    # Effective data root: request override if provided, otherwise config default.
+    effective_data_root = (req.data_root or DATA_ROOT).strip() if isinstance(req.data_root, str) else DATA_ROOT
+    if not effective_data_root:
+        effective_data_root = DATA_ROOT
+
     now = datetime.now()
-    session_dir = Path(DATA_ROOT) / req.task / now.strftime("%m_%d_%Y") / now.strftime("%H_%M_%S")
-    session_dir.mkdir(parents=True, exist_ok=True)
+    session_dir = Path(effective_data_root) / req.task / now.strftime("%m_%d_%Y") / now.strftime("%H_%M_%S")
 
-    # Save shared prompt
-    (session_dir / "prompt.txt").write_text(req.prompt)
+    # All local setup is wrapped in a single try so any failure rolls back the
+    # already-started Jetson recording.
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "prompt.txt").write_text(req.prompt)
 
-    # Start one recorder per camera in its own subdir
-    for cam_idx in camera_manager.indices:
-        cam = camera_manager.get(cam_idx)
-        cam_dir = session_dir / f"cam{cam_idx}"
-        _recorders[cam_idx].start(
-            save_dir=cam_dir,
-            intrinsics=cam.intrinsics,
-            width=current_width,
-            height=current_height,
-            fps=current_fps,
+        for cam_idx in camera_manager.indices:
+            cam = camera_manager.get(cam_idx)
+            cam_dir = session_dir / f"cam{cam_idx}"
+            _recorders[cam_idx].start(
+                save_dir=cam_dir,
+                intrinsics=cam.intrinsics,
+                width=current_width,
+                height=current_height,
+                fps=current_fps,
+            )
+    except Exception as e:
+        # Local setup or recorder start failed — roll back Jetson so it doesn't
+        # stay recording with no corresponding laptop data.
+        if forward_jetson:
+            await _jetson_post_async("/stop")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Local recorder start failed: {e}",
         )
 
     _session_dir = session_dir
@@ -304,22 +413,28 @@ async def start_recording(req: StartRequest):
     _session_prompt = req.prompt
     _session_start = time.time()
     _session_active = True
+    _session_used_jetson = forward_jetson
 
     return {
         "status": "started",
         "session_dir": str(session_dir),
         "cameras": camera_manager.indices,
+        "jetson_session_dir": jetson_session,
+        "used_jetson": forward_jetson,
     }
 
 
 @app.post("/stop")
 async def stop_recording():
-    global _session_dir, _session_task, _session_prompt, _session_start, _session_active
+    global _session_dir, _session_task, _session_prompt, _session_start
+    global _session_active, _session_used_jetson
 
     if not _session_active:
         raise HTTPException(status_code=409, detail="Not recording")
 
     _session_active = False
+    used_jetson_this_session = _session_used_jetson
+    _session_used_jetson = False
     elapsed = round(time.time() - _session_start, 2)
     session_dir_snap = _session_dir  # snapshot before globals are cleared below
 
@@ -340,21 +455,32 @@ async def stop_recording():
                 )
             results[f"cam{cam_idx}"] = info
 
-        # Auto-trim: strip still lead-in/lead-out from all cameras.
-        # Raw files are kept as rgb_raw.mp4 / depth_raw.npz.
-        print("[Server] Auto-trimming session...")
-        try:
-            trim_results = trim_session(session_dir_snap)
-            for cam_name, trim_info in trim_results.items():
-                if cam_name in results and "error" not in trim_info:
-                    results[cam_name]["trim"] = trim_info
-        except Exception as e:
-            print(f"[Server] trim_session failed: {e}")
-
         return results
 
+    # Stop local cameras and Jetson daemon concurrently. Local stop is the
+    # source of truth for our NPZ files; Jetson stop is best-effort — if it
+    # fails, we surface the error but don't roll the local save back (the
+    # cameras already stopped).
     loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _do_stop)
+    local_task = loop.run_in_executor(None, _do_stop)
+    jetson_task = (
+        _jetson_post_async("/stop")
+        if used_jetson_this_session
+        else asyncio.sleep(0, result=(None, None))
+    )
+    results, (jet_code, jet_body) = await asyncio.gather(local_task, jetson_task)
+
+    if jet_code is None:
+        # forwarding disabled (JETSON_URL unset)
+        jetson_result, jetson_error = None, None
+    elif jet_code == 200:
+        jetson_result, jetson_error = jet_body, None
+    elif jet_code == -1:
+        # connection failure, jet_body already has {"error": "..."}
+        jetson_result, jetson_error = None, jet_body.get("error", "Jetson unreachable")
+    else:
+        jetson_result = None
+        jetson_error = f"Jetson /stop failed (HTTP {jet_code}): {jet_body}"
 
     # Update stats
     stats = load_stats()
@@ -383,6 +509,8 @@ async def stop_recording():
         "session_dir": session_dir_str,
         "elapsed_seconds": elapsed,
         "cameras": results,
+        "jetson": jetson_result,
+        "jetson_error": jetson_error,
     }
 
 

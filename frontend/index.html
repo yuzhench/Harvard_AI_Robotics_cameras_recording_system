@@ -282,6 +282,8 @@
       transition: background 0.3s;
     }
     .dot.recording { background: #e05555; animation: pulse 1s infinite; }
+    .dot.jetson-ok { background: #3aa555; }
+    .dot.jetson-off { background: #888; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -290,6 +292,11 @@
 
     #rec-label { font-size: 0.85rem; color: #666; }
     #rec-elapsed { font-size: 0.85rem; color: #888; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+    #jetson-label { font-size: 0.8rem; color: #888; }
+    #jetson-label.ok       { color: #3aa555; }
+    #jetson-label.off      { color: #b05050; }
+    #jetson-label.disabled { color: #666; }
 
     /* Inputs */
     label {
@@ -644,6 +651,10 @@
         <span id="rec-label">Idle</span>
         <span id="rec-elapsed"></span>
       </div>
+      <div class="status-row">
+        <div class="dot jetson-off" id="jetson-dot"></div>
+        <span id="jetson-label" class="disabled">Robot: checking…</span>
+      </div>
     </div>
 
     <!-- Task + prompt -->
@@ -654,6 +665,15 @@
 
       <label style="margin-top:10px">Text Prompt</label>
       <textarea id="prompt-input" placeholder="Describe this demo…"></textarea>
+
+      <label style="margin-top:10px">Save Directory (laptop side)</label>
+      <input type="text" id="data-root-input"
+             placeholder="/home/USER/go2_data  (leave empty for server default)" />
+
+      <label style="margin-top:10px; display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="use-jetson-toggle" checked style="width:auto; margin:0;" />
+        <span>Also record robot (Jetson)</span>
+      </label>
     </div>
 
     <!-- Settings -->
@@ -939,13 +959,25 @@ async function fetchStatus() {
 
     // Update per-camera info text and intrinsics panel
     const cameras = d.cameras || {};
+    const liveFps = d.live_fps || {};
     for (const [idxStr, info] of Object.entries(cameras)) {
       const idx = parseInt(idxStr);
       _camIntrinsicsCache[idx] = info.intrinsics;   // cache for point-cloud viewer
       const infoEl = document.getElementById(`cam-info-${idx}`);
       if (infoEl) {
+        // FPS column: while recording show "30 (live 22.1)" with color-coded
+        // live number; otherwise just the target.
+        const live = liveFps[idxStr];
+        let fpsHtml = `${d.fps}`;
+        if (d.recording && typeof live === 'number') {
+          const target = d.fps;
+          // green if within 10% of target, yellow 10-25%, red >25%
+          const diff = Math.abs(live - target) / target;
+          const color = diff < 0.10 ? '#3aa555' : diff < 0.25 ? '#d6a84e' : '#e05555';
+          fpsHtml = `${target} <span style="color:${color};font-variant-numeric:tabular-nums">(live ${live.toFixed(1)})</span>`;
+        }
         infoEl.innerHTML =
-          `<span>Name:</span> ${info.name} &nbsp;|&nbsp; <span>Serial:</span> ${info.serial} &nbsp;|&nbsp; <span>FPS:</span> ${d.fps} &nbsp;|&nbsp; <span>Res:</span> ${d.width}×${d.height}`;
+          `<span>Name:</span> ${info.name} &nbsp;|&nbsp; <span>Serial:</span> ${info.serial} &nbsp;|&nbsp; <span>FPS:</span> ${fpsHtml} &nbsp;|&nbsp; <span>Res:</span> ${d.width}×${d.height}`;
       }
     }
 
@@ -958,6 +990,51 @@ async function fetchStatus() {
 
 setInterval(fetchStatus, 2000);
 fetchStatus();
+
+// ------------------------------------------------------------------ //
+// Jetson record daemon status (polled every 2 s via /jetson/status proxy)
+// ------------------------------------------------------------------ //
+async function fetchJetsonStatus() {
+  const dot   = document.getElementById('jetson-dot');
+  const label = document.getElementById('jetson-label');
+  if (!dot || !label) return;
+
+  try {
+    const r = await fetch('/jetson/status');
+    const d = await r.json();
+
+    if (!d.enabled) {
+      dot.className = 'dot jetson-off';
+      label.className = 'disabled';
+      label.textContent = 'Robot: disabled';
+      return;
+    }
+    if (!d.reachable) {
+      dot.className = 'dot jetson-off';
+      label.className = 'off';
+      label.textContent = 'Robot: unreachable';
+      return;
+    }
+
+    dot.className = d.recording ? 'dot recording' : 'dot jetson-ok';
+    label.className = 'ok';
+    if (d.recording) {
+      const s = Math.round(d.elapsed || 0);
+      const samp = d.samples || {};
+      label.textContent =
+        `Robot: recording (${s}s · imu ${samp.imu||0} · ego ${samp.ego_frames||0} · lidar ${samp.lidar_scans||0})`;
+    } else {
+      const up = Math.round(d.uptime_s || 0);
+      label.textContent = `Robot: idle (daemon up ${up}s)`;
+    }
+  } catch (_) {
+    dot.className = 'dot jetson-off';
+    label.className = 'off';
+    label.textContent = 'Robot: unreachable';
+  }
+}
+setInterval(fetchJetsonStatus, 2000);
+fetchJetsonStatus();
 
 // ------------------------------------------------------------------ //
 // Stats bar
@@ -1102,27 +1179,60 @@ loadTasks();
 // ------------------------------------------------------------------ //
 // Start / Stop
 // ------------------------------------------------------------------ //
+// Restore last-used save directory and Jetson toggle from localStorage.
+(function restoreSessionPrefs() {
+  const savedRoot = localStorage.getItem('go2DataRoot');
+  const rootEl = document.getElementById('data-root-input');
+  if (rootEl && savedRoot) rootEl.value = savedRoot;
+
+  const savedUseJetson = localStorage.getItem('go2UseJetson');
+  const jetEl = document.getElementById('use-jetson-toggle');
+  if (jetEl && savedUseJetson !== null) {
+    jetEl.checked = savedUseJetson === '1';
+  }
+})();
+
 document.getElementById('btn-start').addEventListener('click', async () => {
   const task = document.getElementById('task-select').value;
   const prompt = document.getElementById('prompt-input').value.trim();
+  const dataRoot = document.getElementById('data-root-input').value.trim();
+  const useJetson = document.getElementById('use-jetson-toggle').checked;
 
   if (!prompt) { toast('Please enter a text prompt.', 'error'); return; }
+
+  // Persist session prefs for next time.
+  localStorage.setItem('go2DataRoot', dataRoot);
+  localStorage.setItem('go2UseJetson', useJetson ? '1' : '0');
 
   try {
     const r = await fetch('/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, prompt }),
+      body: JSON.stringify({
+        task,
+        prompt,
+        data_root: dataRoot || null,
+        use_jetson: useJetson,
+      }),
     });
     const d = await r.json();
-    if (!r.ok) { toast(d.detail || 'Error', 'error'); return; }
+    if (!r.ok) {
+      // Jetson forwarding failure surfaces here as HTTP 502 with detail containing "Jetson /start failed..."
+      toast(d.detail || 'Error', 'error');
+      return;
+    }
 
     document.getElementById('btn-start').disabled = true;
     document.getElementById('btn-stop').disabled = false;
+    document.getElementById('data-root-input').disabled = true;
+    document.getElementById('use-jetson-toggle').disabled = true;
     document.getElementById('rec-dot').classList.add('recording');
     document.getElementById('rec-label').textContent = 'Recording';
     startElapsedTimer();
-    toast('Recording started — ' + task, 'success');
+
+    const robotPart = d.used_jetson ? ' + robot' : ' (cameras only)';
+    toast(`Recording started — ${task}${robotPart}`, 'success');
+    fetchJetsonStatus();
   } catch (e) {
     toast('Connection error', 'error');
   }
@@ -1157,8 +1267,23 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     btnStart.disabled = false;
     btnStop.textContent = '■ Stop';
     recLabel.textContent = 'Idle';
-    toast(`Saved — ${d.elapsed_seconds}s`, 'success');
+    document.getElementById('data-root-input').disabled = false;
+    document.getElementById('use-jetson-toggle').disabled = false;
+
+    // Build a single toast covering cameras + robot outcome
+    let msg = `Saved — ${d.elapsed_seconds}s`;
+    let toastType = 'success';
+    if (d.jetson_error) {
+      msg += ` · robot stop FAILED (${d.jetson_error})`;
+      toastType = 'error';
+    } else if (d.jetson && d.jetson.samples) {
+      const s = d.jetson.samples;
+      msg += ` · robot: imu ${s.imu||0} · ego ${s.ego_frames||0} · lidar ${s.lidar_scans||0}`;
+    }
+    toast(msg, toastType);
+
     fetchStats();
+    fetchJetsonStatus();
   } catch (e) {
     btnStop.disabled = false;
     btnStop.textContent = '■ Stop';
