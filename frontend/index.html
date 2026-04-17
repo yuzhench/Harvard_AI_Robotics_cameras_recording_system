@@ -1414,6 +1414,9 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 
     const robotPart = d.used_jetson ? ' + robot' : ' (cameras only)';
     toast(`Recording started — ${task}${robotPart}`, 'success');
+    // Immediately refresh both state rows so rec-light appears without
+    // waiting for the next 2-second poll tick.
+    fetchStatus();
     fetchJetsonStatus();
   } catch (e) {
     toast('Connection error', 'error');
@@ -1488,6 +1491,9 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     toast(msg, toastType);
 
     fetchStats();
+    // Refresh both state rows immediately so the "idle" transition is
+    // reflected without waiting for the next periodic poll.
+    fetchStatus();
     fetchJetsonStatus();
   } catch (e) {
     btnStop.disabled = false;
