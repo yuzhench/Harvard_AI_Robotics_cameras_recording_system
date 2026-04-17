@@ -16,7 +16,12 @@ TASKS = [
 DEFAULT_FPS = 30
 DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
-DATA_ROOT = "/home/GO2_DATA"
+
+# Default data root for session files and stats.json. Lives under the current
+# user's home so no sudo/chown is needed, and works on any machine (yuzhench,
+# harvardair, etc.). Overridable per-session via the frontend "Save Directory"
+# input or at process startup via the DATA_ROOT env var.
+DATA_ROOT = os.environ.get("DATA_ROOT") or os.path.expanduser("~/GO2_DATA")
 
 # When set (non-empty), POST /start and POST /stop on this server are
 # forwarded to the Jetson record daemon so the robot and cameras record
