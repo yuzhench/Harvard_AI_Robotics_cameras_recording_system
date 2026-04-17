@@ -79,6 +79,7 @@ _session_prompt: str = ""
 _session_start: float = 0.0
 _session_active: bool = False
 _session_used_jetson: bool = False   # True iff the current session started Jetson
+_cameras_saving: bool = False        # True while _do_stop is flushing files
 
 current_fps = DEFAULT_FPS
 current_width = DEFAULT_WIDTH
@@ -270,8 +271,19 @@ async def get_status():
         if idx in _recorders
     }
 
+    # Derived high-level state for UI state-light row.
+    if _cameras_saving:
+        cam_state = "saving"
+    elif recording:
+        cam_state = "recording"
+    elif camera_manager.count == 0:
+        cam_state = "offline"
+    else:
+        cam_state = "idle"
+
     return {
         "recording": recording,
+        "state": cam_state,
         "elapsed": elapsed,
         "frame_count": total_frames,
         "fps": current_fps,
@@ -478,8 +490,20 @@ async def stop_recording():
     # source of truth for our NPZ files; Jetson stop is best-effort — if it
     # fails, we surface the error but don't roll the local save back (the
     # cameras already stopped).
+    global _cameras_saving
+    _cameras_saving = True
+
+    async def _local_with_flag():
+        try:
+            return await loop.run_in_executor(None, _do_stop)
+        finally:
+            # Clear saving flag as soon as local save completes, before
+            # waiting on the (usually slower) Jetson path in gather().
+            global _cameras_saving
+            _cameras_saving = False
+
     loop = asyncio.get_event_loop()
-    local_task = loop.run_in_executor(None, _do_stop)
+    local_task = _local_with_flag()
     jetson_task = (
         _jetson_post_async("/stop")
         if used_jetson_this_session

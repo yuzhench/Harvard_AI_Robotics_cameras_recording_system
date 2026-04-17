@@ -298,6 +298,66 @@
     #jetson-label.off      { color: #b05050; }
     #jetson-label.disabled { color: #666; }
 
+    /* === State-light rows (Cameras / Robot) === */
+    .state-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      font-size: 0.75rem;
+    }
+
+    .state-row-label {
+      min-width: 56px;
+      color: #888;
+      letter-spacing: 0.02em;
+    }
+
+    .state-lights {
+      display: flex;
+      gap: 4px;
+      flex: 1;
+    }
+
+    .state-light {
+      padding: 2px 7px;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      background: #1a1a1a;
+      color: #555;
+      font-size: 0.65rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      user-select: none;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+    }
+
+    .state-light.active[data-state="offline"] {
+      background: #3a2a2a;  border-color: #6a4040;  color: #e09090;
+    }
+    .state-light.active[data-state="idle"] {
+      background: #1f3a2a;  border-color: #3aa555;  color: #a8e0a8;
+    }
+    .state-light.active[data-state="recording"] {
+      background: #3a1f1f;  border-color: #e05555;  color: #ffb0b0;
+      animation: pulse 1s infinite;
+    }
+    .state-light.active[data-state="saving"] {
+      background: #3a2e1f;  border-color: #d6a84e;  color: #f0cf8a;
+    }
+
+    .btn-reset {
+      padding: 2px 8px;
+      font-size: 0.7rem;
+      background: #553333;
+      color: #fbb;
+      border: 1px solid #7a4a4a;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .btn-reset:hover { background: #664040; }
+    .btn-reset:disabled { opacity: 0.5; cursor: default; }
+
     /* Inputs */
     label {
       display: block;
@@ -647,19 +707,37 @@
       <div id="clock">--:--:--</div>
       <div id="date-display">----/--/--</div>
       <div class="status-row">
-        <div class="dot" id="rec-dot"></div>
-        <span id="rec-label">Idle</span>
         <span id="rec-elapsed"></span>
       </div>
-      <div class="status-row">
-        <div class="dot jetson-off" id="jetson-dot"></div>
-        <span id="jetson-label" class="disabled">Robot: checking…</span>
-        <button id="btn-force-stop-robot" title="Force-stop Jetson recording"
-                style="margin-left:auto; padding:2px 8px; font-size:0.7rem;
-                       background:#553333; color:#fbb; border:1px solid #7a4a4a;
-                       border-radius:3px; cursor:pointer;">
-          ⏹ Force-stop
-        </button>
+
+      <div class="state-row" id="cameras-row">
+        <span class="state-row-label">Cameras</span>
+        <span class="state-lights">
+          <span class="state-light" data-state="offline">offline</span>
+          <span class="state-light" data-state="idle">idle</span>
+          <span class="state-light" data-state="recording">rec</span>
+          <span class="state-light" data-state="saving">saving</span>
+        </span>
+        <button class="btn-reset" id="btn-reset-cameras" title="Force-stop local cameras">reset</button>
+      </div>
+
+      <div class="state-row" id="robot-row">
+        <span class="state-row-label">Robot</span>
+        <span class="state-lights">
+          <span class="state-light" data-state="offline">offline</span>
+          <span class="state-light" data-state="idle">idle</span>
+          <span class="state-light" data-state="recording">rec</span>
+          <span class="state-light" data-state="saving">saving</span>
+        </span>
+        <button class="btn-reset" id="btn-reset-robot" title="Force-stop robot">reset</button>
+      </div>
+
+      <!-- Hidden legacy elements kept for JS compatibility -->
+      <div style="display:none">
+        <div class="dot" id="rec-dot"></div>
+        <span id="rec-label">Idle</span>
+        <span id="jetson-label"></span>
+        <span id="jetson-dot"></span>
       </div>
     </div>
 
@@ -955,10 +1033,35 @@ function applyActiveCameras(indices) {
 let recStartTime = null;
 let recTimerInterval = null;
 
+// Helper: light up a single state in a .state-row, grey out the rest.
+function setStateLight(rowId, currentState) {
+  const row = document.getElementById(rowId);
+  if (!row) return;
+  row.querySelectorAll('.state-light').forEach(el => {
+    el.classList.toggle('active', el.dataset.state === currentState);
+  });
+}
+
+// Cameras-row "saving" is short-lived but frontend also optimistically lights
+// it on Stop click. Track optimistic flag so polling doesn't undo it early.
+let _camOptimisticSaving = false;
+let _robotOptimisticSaving = false;
+
 async function fetchStatus() {
   try {
     const r = await fetch('/status');
     const d = await r.json();
+
+    // State-light for Cameras row. Server already computes `state`:
+    //   "offline" | "idle" | "recording" | "saving"
+    let camState = d.state || 'offline';
+    if (_camOptimisticSaving && camState === 'recording') {
+      // User just clicked Stop but server hasn't switched to saving yet —
+      // hold saving. As soon as server reports idle or saving we follow it.
+      camState = 'saving';
+    }
+    if (camState !== 'recording') _camOptimisticSaving = false;
+    setStateLight('cameras-row', camState);
 
     // Update camera panels based on which cameras are connected
     applyActiveCameras(d.active_cameras || []);
@@ -1026,42 +1129,26 @@ fetchStatus();
 // Jetson record daemon status (polled every 2 s via /jetson/status proxy)
 // ------------------------------------------------------------------ //
 async function fetchJetsonStatus() {
-  const dot   = document.getElementById('jetson-dot');
-  const label = document.getElementById('jetson-label');
-  if (!dot || !label) return;
-
   try {
     const r = await fetch('/jetson/status');
     const d = await r.json();
 
-    if (!d.enabled) {
-      dot.className = 'dot jetson-off';
-      label.className = 'disabled';
-      label.textContent = 'Robot: disabled';
-      return;
-    }
-    if (!d.reachable) {
-      dot.className = 'dot jetson-off';
-      label.className = 'off';
-      label.textContent = 'Robot: unreachable';
-      return;
-    }
-
-    dot.className = d.recording ? 'dot recording' : 'dot jetson-ok';
-    label.className = 'ok';
-    if (d.recording) {
-      const s = Math.round(d.elapsed || 0);
-      const samp = d.samples || {};
-      label.textContent =
-        `Robot: recording (${s}s · imu ${samp.imu||0} · ego ${samp.ego_frames||0} · lidar ${samp.lidar_scans||0})`;
+    // Determine Robot state from proxy response.
+    let robotState;
+    if (!d.enabled || !d.reachable) {
+      robotState = 'offline';
+      _robotOptimisticSaving = false;
+    } else if (_robotOptimisticSaving && d.state === 'recording') {
+      // Optimistic: user clicked Stop, server hasn't transitioned yet.
+      robotState = 'saving';
     } else {
-      const up = Math.round(d.uptime_s || 0);
-      label.textContent = `Robot: idle (daemon up ${up}s)`;
+      robotState = d.state || 'idle';
+      if (robotState !== 'recording') _robotOptimisticSaving = false;
     }
+    setStateLight('robot-row', robotState);
   } catch (_) {
-    dot.className = 'dot jetson-off';
-    label.className = 'off';
-    label.textContent = 'Robot: unreachable';
+    setStateLight('robot-row', 'offline');
+    _robotOptimisticSaving = false;
   }
 }
 setInterval(fetchJetsonStatus, 2000);
@@ -1282,6 +1369,13 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
   recLabel.textContent = 'Saving…';
   stopElapsedTimer();
 
+  // Optimistic: light up "saving" on both rows immediately. Polling will
+  // confirm or replace with "idle" once the server actually transitions.
+  _camOptimisticSaving = true;
+  _robotOptimisticSaving = true;
+  setStateLight('cameras-row', 'saving');
+  setStateLight('robot-row', 'saving');
+
   try {
     const r = await fetch('/stop', { method: 'POST' });
     const d = await r.json();
@@ -1341,32 +1435,45 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
 });
 
 // ------------------------------------------------------------------ //
-// Force-stop robot — emergency reset of Jetson daemon state
+// Reset buttons — emergency state re-sync for Cameras and Robot.
+//
+// Both reset buttons send an unconditional /stop to their target. The
+// server-side /stop returns 409 "Not recording" if the target is already
+// idle; the handler treats that as "re-sync success" rather than an error.
 // ------------------------------------------------------------------ //
-document.getElementById('btn-force-stop-robot').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-force-stop-robot');
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '…';
+
+async function _doReset(button, endpoint, labelPrefix) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '…';
   try {
-    const r = await fetch('/jetson/stop', { method: 'POST' });
-    const d = await r.json();
-    if (!r.ok) {
-      toast('Robot force-stop failed: ' + (d.detail || r.status), 'error');
-    } else if (d.status === 'already_idle') {
-      toast('Robot was already idle', 'success');
+    const r = await fetch(endpoint, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) {
+      toast(`${labelPrefix}: reset successful`, 'success');
+    } else if (r.status === 409) {
+      toast(`${labelPrefix}: already idle`, 'success');
     } else {
-      const s = d.jetson && d.jetson.samples ? d.jetson.samples : {};
-      const elapsed = d.jetson && d.jetson.elapsed_seconds;
-      toast(`Robot force-stopped (${elapsed || '?'}s, imu ${s.imu||0} / ego ${s.ego_frames||0} / lidar ${s.lidar_scans||0})`, 'success');
+      toast(`${labelPrefix} reset failed: ${d.detail || r.status}`, 'error');
     }
+    fetchStatus();
     fetchJetsonStatus();
   } catch (e) {
-    toast('Robot force-stop: connection error', 'error');
+    toast(`${labelPrefix} reset: connection error`, 'error');
   } finally {
-    btn.disabled = false;
-    btn.textContent = original;
+    button.disabled = false;
+    button.textContent = original;
   }
+}
+
+document.getElementById('btn-reset-cameras').addEventListener('click', () => {
+  _camOptimisticSaving = false;
+  _doReset(document.getElementById('btn-reset-cameras'), '/stop', 'Cameras');
+});
+
+document.getElementById('btn-reset-robot').addEventListener('click', () => {
+  _robotOptimisticSaving = false;
+  _doReset(document.getElementById('btn-reset-robot'), '/jetson/stop', 'Robot');
 });
 
 // ================================================================= //
