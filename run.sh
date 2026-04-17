@@ -14,5 +14,17 @@ if ! python3 -c "import fastapi" 2>/dev/null; then
   pip install -r requirements.txt
 fi
 
-echo "[INFO] Starting server at http://localhost:8000"
+# Parse --port from args purely for display; the real port is handled by
+# backend.server's argparse via "$@".
+PORT=8000
+for ((i=1; i<=$#; i++)); do
+  arg="${!i}"
+  if [[ "$arg" == "--port" ]]; then
+    n=$((i+1)); PORT="${!n}"
+  elif [[ "$arg" =~ ^--port=(.+)$ ]]; then
+    PORT="${BASH_REMATCH[1]}"
+  fi
+done
+
+echo "[INFO] Starting server at http://localhost:$PORT"
 python3 -m backend.server "$@"

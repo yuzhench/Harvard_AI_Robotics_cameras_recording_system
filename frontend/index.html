@@ -654,6 +654,12 @@
       <div class="status-row">
         <div class="dot jetson-off" id="jetson-dot"></div>
         <span id="jetson-label" class="disabled">Robot: checking…</span>
+        <button id="btn-force-stop-robot" title="Force-stop Jetson recording"
+                style="margin-left:auto; padding:2px 8px; font-size:0.7rem;
+                       background:#553333; color:#fbb; border:1px solid #7a4a4a;
+                       border-radius:3px; cursor:pointer;">
+          ⏹ Force-stop
+        </button>
       </div>
     </div>
 
@@ -985,8 +991,33 @@ async function fetchStatus() {
     const firstCam = cameras[d.active_cameras?.[0]];
     if (firstCam) renderIntrinsics(firstCam.intrinsics);
 
+    // Auto-resync UI if the backend is idle but the UI is still stuck on
+    // "Recording" (e.g., a previous /stop response got lost). The UI is
+    // "thinking recording" iff the Stop button is enabled. Only resync after
+    // we've confirmed the backend is idle for two consecutive polls — avoids
+    // racing a just-fired /start where the server's flag hasn't flipped yet.
+    const uiThinksRecording = !document.getElementById('btn-stop').disabled;
+    if (!d.recording && uiThinksRecording) {
+      _idleStreak = (_idleStreak || 0) + 1;
+      if (_idleStreak >= 2) {
+        console.warn('[sync] Backend idle but UI was recording — resetting.');
+        document.getElementById('btn-start').disabled = false;
+        document.getElementById('btn-stop').disabled = true;
+        document.getElementById('btn-stop').textContent = '■ Stop';
+        document.getElementById('rec-dot').classList.remove('recording');
+        document.getElementById('rec-label').textContent = 'Idle';
+        document.getElementById('data-root-input').disabled = false;
+        document.getElementById('use-jetson-toggle').disabled = false;
+        stopElapsedTimer();
+        _idleStreak = 0;
+      }
+    } else {
+      _idleStreak = 0;
+    }
+
   } catch (_) {}
 }
+let _idleStreak = 0;
 
 setInterval(fetchStatus, 2000);
 fetchStatus();
@@ -1255,7 +1286,22 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     const r = await fetch('/stop', { method: 'POST' });
     const d = await r.json();
     if (!r.ok) {
-      // Restore stop button so user can retry
+      if (r.status === 409) {
+        // Backend already idle — UI was stuck. Re-sync to idle rather than
+        // bouncing back into "Recording" state.
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        btnStop.textContent = '■ Stop';
+        recDot.classList.remove('recording');
+        recLabel.textContent = 'Idle';
+        document.getElementById('data-root-input').disabled = false;
+        document.getElementById('use-jetson-toggle').disabled = false;
+        toast('UI re-synced (backend was already idle)', 'success');
+        fetchStats();
+        fetchJetsonStatus();
+        return;
+      }
+      // Other errors — truly failed. Leave UI as recording for retry.
       btnStop.disabled = false;
       btnStop.textContent = '■ Stop';
       recDot.classList.add('recording');
@@ -1265,6 +1311,7 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     }
 
     btnStart.disabled = false;
+    btnStop.disabled = true;
     btnStop.textContent = '■ Stop';
     recLabel.textContent = 'Idle';
     document.getElementById('data-root-input').disabled = false;
@@ -1290,6 +1337,35 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     recDot.classList.add('recording');
     recLabel.textContent = 'Recording';
     toast('Connection error', 'error');
+  }
+});
+
+// ------------------------------------------------------------------ //
+// Force-stop robot — emergency reset of Jetson daemon state
+// ------------------------------------------------------------------ //
+document.getElementById('btn-force-stop-robot').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-force-stop-robot');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/jetson/stop', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      toast('Robot force-stop failed: ' + (d.detail || r.status), 'error');
+    } else if (d.status === 'already_idle') {
+      toast('Robot was already idle', 'success');
+    } else {
+      const s = d.jetson && d.jetson.samples ? d.jetson.samples : {};
+      const elapsed = d.jetson && d.jetson.elapsed_seconds;
+      toast(`Robot force-stopped (${elapsed || '?'}s, imu ${s.imu||0} / ego ${s.ego_frames||0} / lidar ${s.lidar_scans||0})`, 'success');
+    }
+    fetchJetsonStatus();
+  } catch (e) {
+    toast('Robot force-stop: connection error', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 });
 

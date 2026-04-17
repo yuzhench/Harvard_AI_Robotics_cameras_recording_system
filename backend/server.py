@@ -220,6 +220,23 @@ async def get_tasks():
     return {"tasks": TASKS}
 
 
+@app.post("/jetson/stop")
+async def force_stop_jetson():
+    """Force-stop the Jetson record daemon regardless of local camera state.
+    Used to clear orphaned recordings when local/Jetson states diverge."""
+    if not _jetson_enabled():
+        raise HTTPException(status_code=503, detail="JETSON_URL unset")
+    code, body = await _jetson_post_async("/stop")
+    if code == 200:
+        return {"status": "stopped", "jetson": body}
+    if code == 409:
+        # Jetson was already idle — not an error, just re-sync UI.
+        return {"status": "already_idle", "jetson": body}
+    if code == -1:
+        raise HTTPException(status_code=502, detail=body.get("error", "Jetson unreachable"))
+    raise HTTPException(status_code=502, detail=f"Jetson /stop failed (HTTP {code}): {body}")
+
+
 @app.get("/jetson/status")
 async def get_jetson_status():
     """Proxy the Jetson record daemon's /status so the frontend can poll it
