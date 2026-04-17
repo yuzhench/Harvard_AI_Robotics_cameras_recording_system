@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from .config import (
     TASKS, DEFAULT_FPS, DEFAULT_WIDTH, DEFAULT_HEIGHT, DATA_ROOT,
-    JETSON_URL, JETSON_TIMEOUT_S,
+    JETSON_URL, JETSON_TIMEOUT_S, PROTOCOL_VERSION,
 )
 from .camera import CameraManager
 from .recorder import Recorder
@@ -282,6 +282,7 @@ async def get_status():
         cam_state = "idle"
 
     return {
+        "version": PROTOCOL_VERSION,
         "recording": recording,
         "state": cam_state,
         "elapsed": elapsed,

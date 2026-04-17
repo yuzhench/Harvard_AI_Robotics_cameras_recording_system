@@ -615,6 +615,13 @@
 </head>
 <body>
 
+<!-- Version-mismatch banner. Injected by JS when a backend's PROTOCOL_VERSION
+     differs from the frontend's expected value. Operations blocked while
+     visible. -->
+<div id="version-banner" style="display:none; padding:8px 14px;
+     background:#5a2020; color:#ffcaca; border-bottom:1px solid #8a3a3a;
+     font-size:0.85rem; font-family:monospace;"></div>
+
 <h1>RealSense Recording Pipeline</h1>
 
 <!-- Stats bar -->
@@ -1033,6 +1040,40 @@ function applyActiveCameras(indices) {
 let recStartTime = null;
 let recTimerInterval = null;
 
+// Must equal backend/config.py::PROTOCOL_VERSION and jetson/config.py::PROTOCOL_VERSION.
+// Bump in all three places together when the HTTP contract changes.
+const EXPECTED_PROTOCOL_VERSION = 2;
+
+// Track mismatch state: { camera: bool, jetson: bool }
+const _versionMismatch = { camera: false, jetson: false };
+const _lastSeenVersion = { camera: null, jetson: null };
+
+function updateVersionBanner() {
+  const banner = document.getElementById('version-banner');
+  if (!banner) return;
+  const bad = [];
+  if (_versionMismatch.camera) {
+    bad.push(`camera server v${_lastSeenVersion.camera ?? '?'}`);
+  }
+  if (_versionMismatch.jetson) {
+    bad.push(`Jetson daemon v${_lastSeenVersion.jetson ?? '?'}`);
+  }
+  if (bad.length === 0) {
+    banner.style.display = 'none';
+    banner.textContent = '';
+  } else {
+    banner.style.display = 'block';
+    banner.textContent =
+      `⚠ Version mismatch — frontend expects v${EXPECTED_PROTOCOL_VERSION}, got ${bad.join(' and ')}. ` +
+      `Recording is disabled. Rsync latest code + restart the affected service, then reload this page.`;
+  }
+  // Disable Start whenever there's any mismatch.
+  const startBtn = document.getElementById('btn-start');
+  if (startBtn) {
+    startBtn.disabled = bad.length > 0 || startBtn.dataset.lockedRecording === '1';
+  }
+}
+
 // Helper: light up a single state in a .state-row, grey out the rest.
 function setStateLight(rowId, currentState) {
   const row = document.getElementById(rowId);
@@ -1052,7 +1093,16 @@ async function fetchStatus() {
     const r = await fetch('/status');
     const d = await r.json();
 
-    // State-light for Cameras row. Server already computes `state`:
+    // Strict protocol-version check.
+    _lastSeenVersion.camera = d.version ?? null;
+    _versionMismatch.camera = d.version !== EXPECTED_PROTOCOL_VERSION;
+    updateVersionBanner();
+    if (_versionMismatch.camera) {
+      setStateLight('cameras-row', 'offline');
+      return;
+    }
+
+    // State-light for Cameras row. Server computes `state`:
     //   "offline" | "idle" | "recording" | "saving"
     let camState = d.state || 'offline';
     if (_camOptimisticSaving && camState === 'recording') {
@@ -1133,18 +1183,32 @@ async function fetchJetsonStatus() {
     const r = await fetch('/jetson/status');
     const d = await r.json();
 
-    // Determine Robot state from proxy response.
-    let robotState;
+    // Proxy may still succeed with reachable=false even if Jetson is down.
     if (!d.enabled || !d.reachable) {
-      robotState = 'offline';
+      // Not a version issue — clear mismatch flag and display offline.
+      _lastSeenVersion.jetson = null;
+      _versionMismatch.jetson = false;
+      updateVersionBanner();
+      setStateLight('robot-row', 'offline');
       _robotOptimisticSaving = false;
-    } else if (_robotOptimisticSaving && d.state === 'recording') {
-      // Optimistic: user clicked Stop, server hasn't transitioned yet.
-      robotState = 'saving';
-    } else {
-      robotState = d.state || 'idle';
-      if (robotState !== 'recording') _robotOptimisticSaving = false;
+      return;
     }
+
+    // Strict protocol-version check (only meaningful when reachable).
+    _lastSeenVersion.jetson = d.version ?? null;
+    _versionMismatch.jetson = d.version !== EXPECTED_PROTOCOL_VERSION;
+    updateVersionBanner();
+    if (_versionMismatch.jetson) {
+      setStateLight('robot-row', 'offline');
+      _robotOptimisticSaving = false;
+      return;
+    }
+
+    let robotState = d.state || 'idle';
+    if (_robotOptimisticSaving && robotState === 'recording') {
+      robotState = 'saving';
+    }
+    if (robotState !== 'recording') _robotOptimisticSaving = false;
     setStateLight('robot-row', robotState);
   } catch (_) {
     setStateLight('robot-row', 'offline');
