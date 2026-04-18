@@ -78,8 +78,9 @@
       display: flex;
       flex-direction: row;
       gap: 0;
-      height: calc(100vh - 110px);
+      height: calc(100vh - 110px - var(--log-height, 240px));
       min-height: 500px;
+      transition: height 0.2s;
     }
 
     .left-pane {
@@ -595,7 +596,7 @@
     /* Toast */
     #toast {
       position: fixed;
-      bottom: 20px;
+      bottom: calc(var(--log-height, 240px) + 20px);
       right: 20px;
       background: #1e1e1e;
       border: 1px solid #444;
@@ -604,13 +605,93 @@
       font-size: 0.85rem;
       color: #ccc;
       opacity: 0;
-      transition: opacity 0.3s;
+      transition: opacity 0.3s, bottom 0.2s;
       pointer-events: none;
       z-index: 9999;
     }
     #toast.show { opacity: 1; }
     #toast.error { border-color: #e05555; color: #f88; }
     #toast.success { border-color: #2e8c55; color: #8ef; }
+    #toast.warning { border-color: #d4a85a; color: #fdd987; }
+
+    /* Event log panel (persistent footer, collapsible) */
+    :root { --log-height: 240px; }
+    body.log-collapsed { --log-height: 32px; }
+    body { padding-bottom: calc(var(--log-height) + 10px); }
+
+    #event-log-panel {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: var(--log-height);
+      background: #0f0f0f;
+      border-top: 1px solid #333;
+      display: flex;
+      flex-direction: column;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 0.78rem;
+      z-index: 9000;
+      transition: height 0.2s;
+    }
+    #event-log-header {
+      flex: 0 0 auto;
+      height: 32px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #161616;
+      border-bottom: 1px solid #2a2a2a;
+      color: #aaa;
+      user-select: none;
+    }
+    #event-log-header .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #event-log-header .badge {
+      background: #2a2a2a;
+      border-radius: 3px;
+      padding: 1px 6px;
+      font-size: 0.7rem;
+      color: #888;
+    }
+    #event-log-header .actions {
+      display: flex;
+      gap: 6px;
+    }
+    #event-log-header button {
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #aaa;
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #event-log-header button:hover { background: #282828; color: #ddd; }
+    #event-log-body {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 6px 12px;
+      line-height: 1.5;
+    }
+    body.log-collapsed #event-log-body { display: none; }
+    #event-log-body .log-entry {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #bbb;
+    }
+    #event-log-body .log-entry .ts { color: #666; margin-right: 8px; }
+    #event-log-body .log-entry.log-success { color: #8ef; }
+    #event-log-body .log-entry.log-error   { color: #f88; }
+    #event-log-body .log-entry.log-warning { color: #fdd987; }
+    #event-log-body .log-entry.log-info    { color: #bbb; }
+    #event-log-body .log-entry.log-system  { color: #888; font-style: italic; }
+    #event-log-body .empty { color: #555; font-style: italic; }
   </style>
 </head>
 <body>
@@ -739,6 +820,24 @@
         <button class="btn-reset" id="btn-reset-robot" title="Force-stop robot">reset</button>
       </div>
 
+      <div class="state-row" id="robot-fps-row" style="margin-top:2px; padding-left:60px; color:#888; font-size:0.7rem;">
+        <span id="robot-ego-fps">ego: — fps</span>
+      </div>
+
+      <!-- Sync status + button -->
+      <div style="margin-top:10px; padding-top:8px; border-top:1px solid #222;">
+        <div style="display:flex; align-items:center; gap:8px; font-size:0.75rem;">
+          <span style="color:#888; letter-spacing:0.02em;">Jetson → Laptop</span>
+          <span id="sync-summary" style="color:#888; font-variant-numeric:tabular-nums; flex:1; text-align:right;">checking…</span>
+          <button id="btn-sync" title="Rsync Jetson's GO2_DATA to this laptop"
+                  style="padding:3px 10px; font-size:0.72rem;
+                         background:#2a4f33; color:#bde1c5; border:1px solid #3a7047;
+                         border-radius:3px; cursor:pointer;">
+            ↓ Sync
+          </button>
+        </div>
+      </div>
+
       <!-- Hidden legacy elements kept for JS compatibility -->
       <div style="display:none">
         <div class="dot" id="rec-dot"></div>
@@ -762,8 +861,12 @@
              placeholder="/home/USER/go2_data  (leave empty for server default)" />
 
       <label style="margin-top:10px; display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="use-cameras-toggle" checked style="width:auto; margin:0;" />
+        <span>Record cameras (4× RealSense, laptop)</span>
+      </label>
+      <label style="margin-top:6px; display:flex; align-items:center; gap:8px; cursor:pointer;">
         <input type="checkbox" id="use-jetson-toggle" checked style="width:auto; margin:0;" />
-        <span>Also record robot (Jetson)</span>
+        <span>Record robot (Jetson + ego camera)</span>
       </label>
     </div>
 
@@ -856,6 +959,24 @@
 
 <div id="toast"></div>
 
+<!-- Persistent event log (collapsible). Mirrors every toast() call so
+     errors don't vanish after 3s. Not persisted across page reloads. -->
+<div id="event-log-panel">
+  <div id="event-log-header">
+    <div class="title">
+      <span>Event Log</span>
+      <span class="badge" id="event-log-count">0</span>
+    </div>
+    <div class="actions">
+      <button id="event-log-clear">Clear</button>
+      <button id="event-log-toggle">Collapse</button>
+    </div>
+  </div>
+  <div id="event-log-body">
+    <div class="empty">No events yet.</div>
+  </div>
+</div>
+
 <script>
 // ------------------------------------------------------------------ //
 // Utilities
@@ -866,7 +987,63 @@ function toast(msg, type = '') {
   el.className = 'show ' + type;
   clearTimeout(el._tid);
   el._tid = setTimeout(() => el.className = '', 3000);
+  logEvent(msg, type);
 }
+
+// ------------------------------------------------------------------ //
+// Event log — persistent footer panel mirroring every toast message.
+// Not persisted across reloads (intentional).
+// ------------------------------------------------------------------ //
+let _logCount = 0;
+function logEvent(msg, type = 'info') {
+  const body = document.getElementById('event-log-body');
+  if (!body) return;
+  const empty = body.querySelector('.empty');
+  if (empty) empty.remove();
+
+  // Only auto-scroll if user is already at the bottom — don't yank them
+  // down while they're reading history.
+  const atBottom =
+    body.scrollHeight - body.scrollTop - body.clientHeight < 6;
+
+  const cls = type === 'error' ? 'log-error'
+            : type === 'success' ? 'log-success'
+            : type === 'warning' ? 'log-warning'
+            : type === 'system' ? 'log-system'
+            : 'log-info';
+  const ts = new Date().toTimeString().slice(0, 8);
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + cls;
+  entry.innerHTML = '<span class="ts">[' + ts + ']</span>';
+  entry.appendChild(document.createTextNode(msg));
+  body.appendChild(entry);
+
+  _logCount += 1;
+  const badge = document.getElementById('event-log-count');
+  if (badge) badge.textContent = _logCount;
+
+  if (atBottom) body.scrollTop = body.scrollHeight;
+}
+
+(function wireEventLog() {
+  const toggleBtn = document.getElementById('event-log-toggle');
+  const clearBtn = document.getElementById('event-log-clear');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      const collapsed = document.body.classList.toggle('log-collapsed');
+      toggleBtn.textContent = collapsed ? 'Expand' : 'Collapse';
+    });
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      const body = document.getElementById('event-log-body');
+      body.innerHTML = '<div class="empty">No events yet.</div>';
+      _logCount = 0;
+      document.getElementById('event-log-count').textContent = '0';
+    });
+  }
+  logEvent('Event log ready.', 'system');
+})();
 
 // ------------------------------------------------------------------ //
 // Clock
@@ -1042,7 +1219,7 @@ let recTimerInterval = null;
 
 // Must equal backend/config.py::PROTOCOL_VERSION and jetson/config.py::PROTOCOL_VERSION.
 // Bump in all three places together when the HTTP contract changes.
-const EXPECTED_PROTOCOL_VERSION = 2;
+const EXPECTED_PROTOCOL_VERSION = 3;
 
 // Track mismatch state: { camera: bool, jetson: bool }
 const _versionMismatch = { camera: false, jetson: false };
@@ -1087,6 +1264,10 @@ function setStateLight(rowId, currentState) {
 // it on Stop click. Track optimistic flag so polling doesn't undo it early.
 let _camOptimisticSaving = false;
 let _robotOptimisticSaving = false;
+// What this session actually recorded (set from /start response, used so
+// Stop-click optimistic saving only lights rows that truly have data to flush).
+let _sessionUsedCameras = false;
+let _sessionUsedJetson  = false;
 
 async function fetchStatus() {
   try {
@@ -1191,6 +1372,8 @@ async function fetchJetsonStatus() {
       updateVersionBanner();
       setStateLight('robot-row', 'offline');
       _robotOptimisticSaving = false;
+      const fpsEl = document.getElementById('robot-ego-fps');
+      if (fpsEl) { fpsEl.style.color = '#888'; fpsEl.textContent = 'ego: — fps'; }
       return;
     }
 
@@ -1210,6 +1393,22 @@ async function fetchJetsonStatus() {
     }
     if (robotState !== 'recording') _robotOptimisticSaving = false;
     setStateLight('robot-row', robotState);
+
+    // Ego camera live fps (sliding 1s on Jetson).
+    const fpsEl = document.getElementById('robot-ego-fps');
+    if (fpsEl) {
+      const liveFps = d.live_fps || {};
+      if (robotState === 'recording' && typeof liveFps.ego === 'number') {
+        const target = 30;
+        const diff = Math.abs(liveFps.ego - target) / target;
+        const color = diff < 0.10 ? '#3aa555' : diff < 0.25 ? '#d6a84e' : '#e05555';
+        fpsEl.style.color = color;
+        fpsEl.textContent = `ego: ${liveFps.ego.toFixed(1)} fps`;
+      } else {
+        fpsEl.style.color = '#888';
+        fpsEl.textContent = 'ego: — fps';
+      }
+    }
   } catch (_) {
     setStateLight('robot-row', 'offline');
     _robotOptimisticSaving = false;
@@ -1361,7 +1560,7 @@ loadTasks();
 // ------------------------------------------------------------------ //
 // Start / Stop
 // ------------------------------------------------------------------ //
-// Restore last-used save directory and Jetson toggle from localStorage.
+// Restore last-used save directory and toggle states from localStorage.
 (function restoreSessionPrefs() {
   const savedRoot = localStorage.getItem('go2DataRoot');
   const rootEl = document.getElementById('data-root-input');
@@ -1372,19 +1571,31 @@ loadTasks();
   if (jetEl && savedUseJetson !== null) {
     jetEl.checked = savedUseJetson === '1';
   }
+
+  const savedUseCameras = localStorage.getItem('go2UseCameras');
+  const camEl = document.getElementById('use-cameras-toggle');
+  if (camEl && savedUseCameras !== null) {
+    camEl.checked = savedUseCameras === '1';
+  }
 })();
 
 document.getElementById('btn-start').addEventListener('click', async () => {
   const task = document.getElementById('task-select').value;
   const prompt = document.getElementById('prompt-input').value.trim();
   const dataRoot = document.getElementById('data-root-input').value.trim();
-  const useJetson = document.getElementById('use-jetson-toggle').checked;
+  const useJetson  = document.getElementById('use-jetson-toggle').checked;
+  const useCameras = document.getElementById('use-cameras-toggle').checked;
 
   if (!prompt) { toast('Please enter a text prompt.', 'error'); return; }
+  if (!useCameras && !useJetson) {
+    toast('Check at least one of "cameras" or "robot" to record.', 'error');
+    return;
+  }
 
   // Persist session prefs for next time.
   localStorage.setItem('go2DataRoot', dataRoot);
-  localStorage.setItem('go2UseJetson', useJetson ? '1' : '0');
+  localStorage.setItem('go2UseJetson',  useJetson  ? '1' : '0');
+  localStorage.setItem('go2UseCameras', useCameras ? '1' : '0');
 
   try {
     const r = await fetch('/start', {
@@ -1394,7 +1605,8 @@ document.getElementById('btn-start').addEventListener('click', async () => {
         task,
         prompt,
         data_root: dataRoot || null,
-        use_jetson: useJetson,
+        use_jetson:  useJetson,
+        use_cameras: useCameras,
       }),
     });
     const d = await r.json();
@@ -1404,16 +1616,23 @@ document.getElementById('btn-start').addEventListener('click', async () => {
       return;
     }
 
+    _sessionUsedCameras = !!d.used_cameras;
+    _sessionUsedJetson  = !!d.used_jetson;
+
     document.getElementById('btn-start').disabled = true;
     document.getElementById('btn-stop').disabled = false;
     document.getElementById('data-root-input').disabled = true;
     document.getElementById('use-jetson-toggle').disabled = true;
+    document.getElementById('use-cameras-toggle').disabled = true;
     document.getElementById('rec-dot').classList.add('recording');
     document.getElementById('rec-label').textContent = 'Recording';
     startElapsedTimer();
 
-    const robotPart = d.used_jetson ? ' + robot' : ' (cameras only)';
-    toast(`Recording started — ${task}${robotPart}`, 'success');
+    const pieces = [];
+    if (d.used_cameras) pieces.push('cameras');
+    if (d.used_jetson)  pieces.push('robot');
+    const what = pieces.length ? pieces.join(' + ') : 'nothing (bug?)';
+    toast(`Recording started — ${task} (${what})`, 'success');
     // Immediately refresh both state rows so rec-light appears without
     // waiting for the next 2-second poll tick.
     fetchStatus();
@@ -1436,12 +1655,16 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
   recLabel.textContent = 'Saving…';
   stopElapsedTimer();
 
-  // Optimistic: light up "saving" on both rows immediately. Polling will
-  // confirm or replace with "idle" once the server actually transitions.
-  _camOptimisticSaving = true;
-  _robotOptimisticSaving = true;
-  setStateLight('cameras-row', 'saving');
-  setStateLight('robot-row', 'saving');
+  // Optimistic: light up "saving" only on rows that are actually recording
+  // this session. A robot-only session shouldn't flash saving on cameras.
+  if (_sessionUsedCameras) {
+    _camOptimisticSaving = true;
+    setStateLight('cameras-row', 'saving');
+  }
+  if (_sessionUsedJetson) {
+    _robotOptimisticSaving = true;
+    setStateLight('robot-row', 'saving');
+  }
 
   try {
     const r = await fetch('/stop', { method: 'POST' });
@@ -1457,6 +1680,9 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
         recLabel.textContent = 'Idle';
         document.getElementById('data-root-input').disabled = false;
         document.getElementById('use-jetson-toggle').disabled = false;
+        document.getElementById('use-cameras-toggle').disabled = false;
+        _sessionUsedCameras = false;
+        _sessionUsedJetson  = false;
         toast('UI re-synced (backend was already idle)', 'success');
         fetchStats();
         fetchJetsonStatus();
@@ -1477,11 +1703,19 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
     recLabel.textContent = 'Idle';
     document.getElementById('data-root-input').disabled = false;
     document.getElementById('use-jetson-toggle').disabled = false;
+    document.getElementById('use-cameras-toggle').disabled = false;
+    _sessionUsedCameras = false;
+    _sessionUsedJetson  = false;
 
     // Build a single toast covering cameras + robot outcome
     let msg = `Saved — ${d.elapsed_seconds}s`;
     let toastType = 'success';
-    if (d.jetson_error) {
+    if (d.jetson_timeout) {
+      // Jetson didn't reply in time, but save is likely still running.
+      // Data should appear on the Jetson after a rsync/pull later.
+      msg += ` · robot save status unknown (Jetson did not reply in time — it may still be saving. Check Jetson data dir in a minute.)`;
+      toastType = 'warning';
+    } else if (d.jetson_error) {
       msg += ` · robot stop FAILED (${d.jetson_error})`;
       toastType = 'error';
     } else if (d.jetson && d.jetson.samples) {
@@ -1519,6 +1753,8 @@ async function _doReset(button, endpoint, labelPrefix) {
   try {
     const r = await fetch(endpoint, { method: 'POST' });
     const d = await r.json().catch(() => ({}));
+    const settled = r.ok || r.status === 409;  // 200 or "already idle"
+
     if (r.ok) {
       toast(`${labelPrefix}: reset successful`, 'success');
     } else if (r.status === 409) {
@@ -1526,6 +1762,28 @@ async function _doReset(button, endpoint, labelPrefix) {
     } else {
       toast(`${labelPrefix} reset failed: ${d.detail || r.status}`, 'error');
     }
+
+    // After a successful reset (either server actually stopped, or it was
+    // already idle) bring the whole UI back to a clean idle state. Without
+    // this, inputs / Start button can stay locked from a prior session.
+    if (settled) {
+      const startBtn = document.getElementById('btn-start');
+      const stopBtn  = document.getElementById('btn-stop');
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      stopBtn.textContent = '■ Stop';
+      document.getElementById('data-root-input').disabled = false;
+      document.getElementById('use-jetson-toggle').disabled = false;
+      document.getElementById('use-cameras-toggle').disabled = false;
+      document.getElementById('rec-dot').classList.remove('recording');
+      document.getElementById('rec-label').textContent = 'Idle';
+      stopElapsedTimer();
+      _camOptimisticSaving = false;
+      _robotOptimisticSaving = false;
+      _sessionUsedCameras = false;
+      _sessionUsedJetson  = false;
+    }
+
     fetchStatus();
     fetchJetsonStatus();
   } catch (e) {
@@ -1544,6 +1802,83 @@ document.getElementById('btn-reset-cameras').addEventListener('click', () => {
 document.getElementById('btn-reset-robot').addEventListener('click', () => {
   _robotOptimisticSaving = false;
   _doReset(document.getElementById('btn-reset-robot'), '/jetson/stop', 'Robot');
+});
+
+// ------------------------------------------------------------------ //
+// Sync status + button — pull Jetson's GO2_DATA to this laptop via rsync
+// ------------------------------------------------------------------ //
+function _fmtBytes(n) {
+  if (n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log10(n) / 3));
+  return (n / Math.pow(1000, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+async function fetchSyncStatus() {
+  const el = document.getElementById('sync-summary');
+  const btn = document.getElementById('btn-sync');
+  if (!el || !btn) return;
+  try {
+    const r = await fetch('/sync/status');
+    const d = await r.json();
+    if (!d.enabled) {
+      el.textContent = 'disabled';
+      el.style.color = '#666';
+      btn.disabled = true;
+      return;
+    }
+    if (!d.reachable) {
+      el.textContent = 'unreachable';
+      el.style.color = '#b05050';
+      btn.disabled = true;
+      btn.title = d.detail || 'Jetson unreachable via SSH';
+      return;
+    }
+    if (d.bytes_pending === 0) {
+      el.textContent = 'up to date';
+      el.style.color = '#3aa555';
+      btn.disabled = true;
+      btn.title = `Source: ${d.source}\nDest: ${d.destination}`;
+    } else {
+      el.textContent = `${d.files_pending} files · ${_fmtBytes(d.bytes_pending)} pending`;
+      el.style.color = '#d6a84e';
+      btn.disabled = false;
+      btn.title = `Source: ${d.source}\nDest: ${d.destination}`;
+    }
+  } catch (e) {
+    el.textContent = 'error';
+    el.style.color = '#b05050';
+    btn.disabled = true;
+  }
+}
+
+// Poll every 30s — rsync --dry-run over SSH isn't free, don't hammer it.
+setInterval(fetchSyncStatus, 30000);
+fetchSyncStatus();
+
+document.getElementById('btn-sync').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-sync');
+  const el = document.getElementById('sync-summary');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Syncing…';
+  el.textContent = 'transferring…';
+  el.style.color = '#d6a84e';
+  try {
+    const r = await fetch('/sync/run', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      toast('Sync failed: ' + (d.detail || r.status), 'error');
+    } else {
+      toast(`Sync complete in ${d.elapsed_seconds}s`, 'success');
+    }
+  } catch (e) {
+    toast('Sync: connection error', 'error');
+  } finally {
+    btn.textContent = originalText;
+    // Re-check what's still pending (usually 0 after success).
+    fetchSyncStatus();
+  }
 });
 
 // ================================================================= //
