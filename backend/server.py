@@ -251,6 +251,23 @@ async def force_stop_jetson():
     raise HTTPException(status_code=502, detail=f"Jetson /stop failed (HTTP {code}): {body}")
 
 
+@app.post("/jetson/resync_clock")
+async def resync_jetson_clock():
+    """Trigger chrony restart on the Jetson to force an immediate re-sync.
+    Returns the resulting offset in ms so the UI can show "Synced — 0.2 ms"."""
+    if not _jetson_enabled():
+        raise HTTPException(status_code=503, detail="JETSON_URL unset")
+    # systemctl restart + 3.5s sleep + chronyc → ~6-8s; give some slack
+    code, body = await _jetson_post_async("/resync_clock", timeout=20.0)
+    if code == 200:
+        return body
+    if code == -2:
+        raise HTTPException(status_code=504, detail=body.get("error", "Resync timed out"))
+    if code == -1:
+        raise HTTPException(status_code=502, detail=body.get("error", "Jetson unreachable"))
+    raise HTTPException(status_code=502, detail=f"Jetson /resync_clock failed (HTTP {code}): {body}")
+
+
 def _jetson_ssh_host() -> str:
     """Extract Jetson hostname from JETSON_URL (e.g. http://10.100.206.170:8010)."""
     if not JETSON_URL:

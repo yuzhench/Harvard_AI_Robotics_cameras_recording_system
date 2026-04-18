@@ -3,7 +3,7 @@ import os
 # Bump whenever the HTTP response shape changes in a way that the frontend
 # or the Jetson daemon would need to co-update. Frontend enforces strict
 # equality; mismatch → UI error banner + disabled Start button.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 TASKS = [
     "task1",

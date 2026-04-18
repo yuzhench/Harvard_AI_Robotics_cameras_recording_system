@@ -838,6 +838,21 @@
         </div>
       </div>
 
+      <!-- Clock resync — triggers chrony restart on Jetson so its clock
+           aligns with the laptop before a recording. -->
+      <div style="margin-top:8px;">
+        <div style="display:flex; align-items:center; gap:8px; font-size:0.75rem;">
+          <span style="color:#888; letter-spacing:0.02em;">Clock sync</span>
+          <span id="clock-sync-summary" style="color:#666; font-variant-numeric:tabular-nums; flex:1; text-align:right;">not checked</span>
+          <button id="btn-resync-clock" title="Restart chrony on Jetson to force an instant re-sync with the laptop clock"
+                  style="padding:3px 10px; font-size:0.72rem;
+                         background:#2f3d5a; color:#bdd1e8; border:1px solid #4a6493;
+                         border-radius:3px; cursor:pointer;">
+            ⟳ Resync
+          </button>
+        </div>
+      </div>
+
       <!-- Hidden legacy elements kept for JS compatibility -->
       <div style="display:none">
         <div class="dot" id="rec-dot"></div>
@@ -1219,7 +1234,7 @@ let recTimerInterval = null;
 
 // Must equal backend/config.py::PROTOCOL_VERSION and jetson/config.py::PROTOCOL_VERSION.
 // Bump in all three places together when the HTTP contract changes.
-const EXPECTED_PROTOCOL_VERSION = 3;
+const EXPECTED_PROTOCOL_VERSION = 4;
 
 // Track mismatch state: { camera: bool, jetson: bool }
 const _versionMismatch = { camera: false, jetson: false };
@@ -1878,6 +1893,49 @@ document.getElementById('btn-sync').addEventListener('click', async () => {
     btn.textContent = originalText;
     // Re-check what's still pending (usually 0 after success).
     fetchSyncStatus();
+  }
+});
+
+// ------------------------------------------------------------------ //
+// Clock resync — restart chrony on Jetson, show resulting offset.
+// ------------------------------------------------------------------ //
+document.getElementById('btn-resync-clock').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-resync-clock');
+  const summary = document.getElementById('clock-sync-summary');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⟳ syncing…';
+  summary.textContent = 'restarting chrony…';
+  summary.style.color = '#888';
+  try {
+    const r = await fetch('/jetson/resync_clock', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      const msg = d.detail || 'Resync failed';
+      summary.textContent = 'failed';
+      summary.style.color = '#f88';
+      toast('Clock resync failed: ' + msg, 'error');
+    } else {
+      const off = d.offset_ms;
+      const ref = d.reference || 'unknown';
+      if (d.synced && off !== null) {
+        const absOff = Math.abs(off);
+        summary.textContent = `${off >= 0 ? '+' : ''}${off.toFixed(3)} ms · ${ref}`;
+        summary.style.color = absOff < 1 ? '#8ef' : absOff < 5 ? '#bde1c5' : '#fdd987';
+        toast(`Jetson clock synced — offset ${off.toFixed(3)} ms (ref: ${ref})`, 'success');
+      } else {
+        summary.textContent = off !== null ? `${off.toFixed(1)} ms (not locked)` : 'no lock';
+        summary.style.color = '#fdd987';
+        toast('Jetson clock: restarted but not yet locked — try again in a few seconds', 'warning');
+      }
+    }
+  } catch (e) {
+    summary.textContent = 'connection error';
+    summary.style.color = '#f88';
+    toast('Clock resync: connection error', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 });
 
