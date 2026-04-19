@@ -1,239 +1,265 @@
-# RealSense RGBD Recording Pipeline
+# Camera Record Pipeline
 
-A web-based multi-camera recording system for Intel RealSense D435I cameras. Streams live RGB and aligned depth video in the browser, supports up to 4 simultaneous cameras, and saves synchronized RGB + depth + IMU data to disk.
+Multi-camera recording server for **Intel RealSense D435I** — streams
+live RGB and aligned depth in the browser, records up to 4 cameras
+simultaneously, and optionally coordinates with an on-robot Jetson
+running [go2_record_pipeline](https://github.com/yuzhench/Harvard_AI_Robotics_go2_recording_system)
+for fully synchronized multi-modal capture.
+
+```
+┌────────────────────── Laptop ──────────────────────┐      ┌────── Jetson (optional) ──────┐
+│  Browser UI (index.html)                           │      │  go2_record_pipeline          │
+│      │                                             │      │  :8010                        │
+│      │ HTTP + WS                                   │      │                               │
+│      ▼                                             │      │  ├── IMU / joints / contacts  │
+│  FastAPI backend (this repo)  :8000                │◀───▶ │  ├── Ego RGB-D D435I          │
+│      │                                             │ HTTP │  └── LiDAR                    │
+│      └── USB3 ──▶ 4× RealSense D435I (third-person)│      │                               │
+└────────────────────────────────────────────────────┘      └───────────────────────────────┘
+                         ↕ chrony NTP
+                   (< 5 ms clock alignment)
+```
+
+If no Jetson is configured (`JETSON_URL` unset), this runs stand-alone
+as a 4-camera recorder. When pointed at a Jetson, the Start/Stop buttons
+fan-out to both machines and data lands in matching session directories
+for post-hoc merging.
 
 ---
 
-## Hardware Requirements
+## Quick start
 
-- Intel RealSense D435I (1–4 cameras)
-- USB 3.x recommended for full 30 fps; USB 2.x works at reduced bandwidth
-- Linux (Ubuntu 20.04 / 22.04 / 24.04)
+```bash
+# 1. Build librealsense (first time only — see Installation below)
+
+# 2. Install Python deps
+pip install -r requirements.txt
+
+# 3. Run
+./run.sh                          # real cameras
+./run.sh --mock                   # synthetic cameras, no hardware
+./run.sh --mock --num-mock 4      # simulate 4 cameras
+
+# 4. Open http://localhost:8000 in your browser
+```
 
 ---
 
-## Installation
+## What this does
 
-### 1. Install librealsense (build from source — required for IMU support)
+- **Live preview** — 4-panel grid of RGB or aligned-depth streams over WebSocket
+- **Recording** — synchronized session capture of RGB video (H.264), aligned depth (uint16 NPZ), and per-frame timestamps
+- **3D point cloud viewer** — WebGL, interactive, per-camera snapshot
+- **Task/prompt workflow** — 10 pre-configured tasks, required text prompt per demo, per-task stats bar
+- **Jetson integration** — forwards `/start` / `/stop` / `/resync_clock` to a separate on-robot daemon, with warning vs. error semantics when the robot side is slow or unreachable
+- **Event log** — collapsible footer panel that persists every toast message (successes, warnings, errors) so nothing disappears after 3 s
+
+---
+
+## Using with Go2 (optional Jetson integration)
+
+Set `JETSON_URL` before launching:
+
+```bash
+JETSON_URL=http://10.100.206.170:8010 ./run.sh
+```
+
+The UI gains a **Robot** row (state/FPS/sample counts) and three extra
+controls: a `⟳ Resync` button for clock sync, a `↓ Sync` button for
+rsync-pulling the Jetson's data to this laptop, and a Force-Stop button
+for reconciling diverged states.
+
+Protocol version must match on all three sides (frontend, this backend,
+Jetson daemon). Currently `PROTOCOL_VERSION = 4`.
+
+See **[go2_record_pipeline](https://github.com/yuzhench/Harvard_AI_Robotics_go2_recording_system)**
+for the robot-side deployment.
+
+---
+
+## Session output
+
+```
+<DATA_ROOT>/<task>/<MM_DD_YYYY>/<HH_MM_SS>/
+├── third_person/          ← this repo (4× RealSense D435I)
+│   ├── cam0/
+│   │   ├── rgb.mp4               H.264 video
+│   │   ├── rgb_timestamps.npy    (N,) float64 Unix epoch
+│   │   ├── depth.npz             {depth: (N,H,W) uint16, timestamps: (N,) float64}
+│   │   └── intrinsics.json
+│   ├── cam1/  ...
+│   ├── cam2/  ...
+│   ├── cam3/  ...
+│   └── session_meta.json
+└── first_person/          ← written by go2_record_pipeline (if used)
+    └── ...
+```
+
+`DATA_ROOT` defaults to `~/GO2_DATA`; override with `DATA_ROOT=/path/to/dir ./run.sh`.
+
+---
+
+<details>
+<summary><b>Installation (librealsense from source)</b></summary>
+
+On x86_64 Linux `pip install pyrealsense2` is usually sufficient (Intel
+ships wheels on PyPI). For IMU support or aarch64 (Jetson) you must
+build from source:
 
 ```bash
 sudo apt install -y git cmake build-essential libusb-1.0-0-dev libudev-dev \
-    libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev libgtk-3-dev
+    libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev libgtk-3-dev python3-dev
 
 git clone https://github.com/IntelRealSense/librealsense.git
 cd librealsense
-
-# USB udev rules (allows non-root camera access)
 sudo cp config/99-realsense-libusb.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
 mkdir build && cd build
 cmake .. -DBUILD_PYTHON_BINDINGS=ON \
          -DPYTHON_EXECUTABLE=$(which python3) \
-         -DCMAKE_BUILD_TYPE=Release \
-         -DBUILD_EXAMPLES=ON
-
+         -DCMAKE_BUILD_TYPE=Release
 make -j$(($(nproc)-1)) && sudo make install
 sudo ldconfig
+
+# Copy the Python binding into your active conda/venv
+cp wrappers/python/pyrealsense2*.so $CONDA_PREFIX/lib/python*/site-packages/
 ```
 
-### 2. Install Python dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Verify camera is detected
-
+Verify:
 ```bash
 realsense-viewer
 python3 -c "import pyrealsense2 as rs; print(rs.__version__)"
 ```
 
----
+</details>
 
-## Running the Server
-
-```bash
-./run.sh                        # real cameras, default settings
-./run.sh --mock                 # mock cameras (no hardware needed)
-./run.sh --mock --num-mock 4    # simulate 4 cameras
-./run.sh --fps 15               # change frame rate
-./run.sh --width 1280 --height 720  # change resolution
-./run.sh --port 8001            # use a different port
-```
-
-Then open **http://localhost:8000** in your browser.
-
----
-
-## Web Interface
+<details>
+<summary><b>Web UI guide</b></summary>
 
 ### Layout
 
-The interface is split into two panes separated by a draggable divider:
+Two-pane split with a draggable divider.
 
-- **Left pane** — live camera feeds (2×2 grid)
-- **Right pane** — recording controls, settings, intrinsics, orientation
+**Left pane** — 2×2 camera grid. Each panel shows a `LIVE` / `OFFLINE`
+badge, a RGB/Aligned-Depth toggle, and a `⊙ Cloud` button that opens
+the 3D point cloud viewer.
 
----
+**Right pane** — collapsible cards for state, session setup, camera
+settings, intrinsics, orientation (pitch/roll from D435I IMU),
+optional robot row (when `JETSON_URL` is set), and Sync/Resync controls.
 
-### Camera Grid (Left Pane)
+### Event log
 
-Up to 4 camera panels are shown at all times.
+Persistent collapsible footer. Every toast (success / warning / error /
+info) is also logged here with a timestamp, colored by type. Not
+persisted across reloads — by design, to avoid stale context.
 
-| Element | Description |
-|---------|-------------|
-| **LIVE** badge | Camera is connected and streaming |
-| **OFFLINE** badge | Camera not detected |
-| **RGB** button | Switch panel to color stream |
-| **Aligned Depth** button | Switch panel to depth stream (colorized, aligned to RGB) |
-| **⊙ Cloud** button | Open interactive 3D point cloud viewer for this camera |
+### Point cloud viewer
 
-Cameras are activated automatically when detected — no manual configuration needed.
+Pure WebGL 2, no external libraries. Drag to orbit, scroll to zoom.
+Density slider controls back-projection stride (lower = denser = slower).
+`⟳ Capture` snapshots the current live frame.
 
----
+</details>
 
-### Stats Bar (Top)
-
-Shows one chip per task. Each chip displays:
-- Task name
-- Number of recorded demos
-- Average demo duration
-
-Click a chip to select that task in the session setup dropdown.
-
----
-
-### Right Pane — Controls
-
-#### Clock Card
-- Current time and date
-- Recording status indicator (red pulsing dot when recording)
-- Elapsed recording time
-
-#### Session Setup
-- **Task** — select from task1–task10
-- **Text Prompt** — describe what is happening in this demo (required to start recording)
-
-#### Camera Settings
-- **FPS** — frames per second (default 30)
-- **Resolution** — 640×480 / 1280×720 / 848×480 / 424×240
-
-#### Recording Buttons
-- **▶ Start** — begin recording (requires a text prompt)
-- **■ Stop** — stop and save; shows "⏳ Saving…" while compressing depth data
-
-#### Camera Intrinsics
-Displays focal lengths (fx, fy), principal point (cx, cy), distortion model, depth scale, and serial number for the first active camera.
-
-#### Orientation — Pitch / Roll
-2×2 grid showing real-time pitch and roll for each camera, read from the D435I's built-in IMU. Updates at 2 Hz via WebSocket.
-
----
-
-### Point Cloud Viewer
-
-Click **⊙ Cloud** on any camera panel to open the interactive 3D viewer.
-
-| Control | Action |
-|---------|--------|
-| **Drag** | Orbit (rotate) |
-| **Scroll wheel** | Zoom in/out |
-| **Pinch** (touch) | Zoom |
-| **⟳ Capture** button | Snapshot current frame as point cloud |
-| **Density slider** | Left = low density (fast), Right = high density (full res) |
-
-The viewer shows:
-- **Point cloud** — colored by the RGB frame
-- **Coordinate axes** — X (red), Y (green), Z (blue) at camera origin
-- **Camera sensor body** — small rectangle at the sensor face
-- **Frustum wireframe** — showing the camera's field of view
-
-The status bar at the bottom confirms the renderer (e.g. `WebGL 2.0 (OpenGL ES 3.0)`).
-
----
-
-## Recording a Demo
-
-1. Connect RealSense camera(s) and start the server with `./run.sh`
-2. Open **http://localhost:8000**
-3. Wait for camera panels to show **LIVE**
-4. Select a **Task** from the dropdown
-5. Type a **Text Prompt** describing the demo
-6. (Optional) Adjust FPS and resolution
-7. Click **▶ Start**
-8. Perform the demo
-9. Click **■ Stop** — data is saved automatically
-
----
-
-## Output Data Structure
-
-```
-data/
-└── task1/
-    └── 04_07_2026/
-        └── 14_32_05/
-            ├── prompt.txt          # text description of the demo
-            ├── cam1/
-            │   ├── rgb.mp4         # color video (H.264)
-            │   ├── depth.npz       # aligned depth frames + timestamps
-            │   └── intrinsics.json # camera calibration
-            └── cam2/
-                ├── rgb.mp4
-                ├── depth.npz
-                └── intrinsics.json
-```
-
-### depth.npz format
-
-```python
-import numpy as np
-d = np.load("depth.npz")
-depth      = d["depth"]       # shape (N, H, W), uint16, units = depth_scale metres
-timestamps = d["timestamps"]  # shape (N,), float64, Unix timestamps
-```
-
-Depth is **aligned to the color frame** — each pixel in `depth` corresponds to the same pixel in the RGB frame.
-
-### intrinsics.json format
-
-```json
-{
-  "color": { "fx": 615.0, "fy": 615.0, "ppx": 320.0, "ppy": 240.0, ... },
-  "depth": { "fx": 615.0, "fy": 615.0, "ppx": 320.0, "ppy": 240.0, "depth_scale": 0.001 },
-  "serial": "344422072270",
-  "name": "Intel RealSense D435I"
-}
-```
-
----
-
-## CLI Options
+<details>
+<summary><b>CLI options</b></summary>
 
 | Flag | Default | Description |
-|------|---------|-------------|
+|---|---|---|
 | `--fps` | 30 | Frame rate |
 | `--width` | 640 | Frame width |
 | `--height` | 480 | Frame height |
 | `--port` | 8000 | Server port |
-| `--mock` | off | Use synthetic cameras (no hardware) |
+| `--mock` | off | Synthetic cameras, no hardware |
 | `--num-mock` | 2 | Number of mock cameras |
+
+Environment variables:
+
+| Var | Default | Description |
+|---|---|---|
+| `DATA_ROOT` | `~/GO2_DATA` | Session output root |
+| `JETSON_URL` | `http://10.100.206.170:8010` | Jetson daemon (empty disables forwarding) |
+| `JETSON_TIMEOUT_S` | `5.0` | Default HTTP timeout to Jetson |
+| `JETSON_STOP_TIMEOUT_S` | `60.0` | Longer timeout for `/stop` (save can be slow) |
+| `JETSON_RSYNC_BWLIMIT_KBPS` | `5000` | Rate-limit rsync to avoid saturating WiFi |
+| `JETSON_SSH_USER` | `unitree` | SSH user for rsync from Jetson |
+| `JETSON_DATA_ROOT` | `/home/unitree/GO2_DATA` | Remote path for rsync |
+
+</details>
+
+<details>
+<summary><b>HTTP API</b></summary>
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | Web dashboard |
+| `GET` | `/status` | Camera state, FPS, resolution, active cameras |
+| `GET` | `/tasks` | Available task names |
+| `GET` | `/stats` | Per-task demo counts and durations |
+| `POST` | `/start` | Start recording. Body: `{"task":..., "prompt":...}` |
+| `POST` | `/stop` | Stop and save. Returns per-camera + robot results. |
+| `POST` | `/jetson/stop` | Force-stop only the Jetson (for state reconciliation) |
+| `POST` | `/jetson/resync_clock` | Trigger chrony restart on Jetson, return offset |
+| `GET` | `/jetson/sync_status` | Check how much data Jetson has pending for rsync |
+| `POST` | `/jetson/sync` | Run rsync pull from Jetson to laptop |
+| `GET` | `/pointcloud?cam=N&stride=S` | Current point cloud as binary blob |
+| `GET` | `/orientation` | Pitch/roll for all cameras |
+| `WS` | `/ws/stream?cam=N&mode=color` | Live JPEG stream |
+| `WS` | `/ws/orientation` | Real-time IMU orientation at 2 Hz |
+
+</details>
+
+<details>
+<summary><b>Time synchronization with the Jetson</b></summary>
+
+Both machines rely on a shared `time.time()` (Unix UTC epoch) for
+timestamping. `chrony` on each host keeps clocks aligned to < 5 ms
+(typically < 100 μs on LAN).
+
+The UI **⟳ Resync** button triggers a `systemctl restart chrony` on the
+Jetson via the daemon, then waits for convergence and reports the
+resulting offset. Intended to be pressed once per recording session as
+a belt-and-braces check.
+
+Full setup and rationale lives in the robot repo:
+[go2_record_pipeline/GO_NOTES/control_architecture.md §19](https://github.com/yuzhench/Harvard_AI_Robotics_go2_recording_system/blob/main/GO_NOTES/control_architecture.md).
+
+</details>
+
+<details>
+<summary><b>Troubleshooting</b></summary>
+
+**Cameras show OFFLINE**
+- `realsense-viewer` sees them? If not, udev/permissions. Re-run the `setup_udev_rules.sh` step.
+- USB 2.0 only? Force to USB 3 port (blue) — D435I at 30 fps / 640×480 needs USB 3.
+
+**Stop returns a yellow warning** ("robot save status unknown")
+- Jetson is still flushing to disk; not an error. Wait 30 s and the session directory on Jetson will have all files.
+
+**Sync button fails with "connection closed" or "broken pipe"**
+- WiFi saturation killing SSH. Lower `JETSON_RSYNC_BWLIMIT_KBPS` to `2000` and retry.
+
+**Timestamps misaligned between `first_person/` and `third_person/`**
+- Run the ⟳ Resync button before the next recording. Check `chronyc tracking` on the Jetson — `System time` should be < 0.005 s.
+
+**Version mismatch red banner**
+- Protocol version between frontend, this backend, and the Jetson daemon must match (`PROTOCOL_VERSION` in each `config.py`). After upgrading, restart the Jetson daemon and hard-refresh the browser.
+
+</details>
 
 ---
 
-## API Endpoints
+## Requirements
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Web dashboard |
-| `GET` | `/status` | Camera state, FPS, resolution, active cameras |
-| `GET` | `/tasks` | List of available task names |
-| `GET` | `/stats` | Per-task demo counts and durations |
-| `POST` | `/start` | Start recording `{"task": "task1", "prompt": "..."}` |
-| `POST` | `/stop` | Stop recording and save |
-| `GET` | `/pointcloud?cam=1&stride=2` | Current point cloud as binary blob |
-| `GET` | `/orientation` | Pitch/roll for all cameras |
-| `WS` | `/ws/stream?cam=1&mode=color` | Live JPEG stream |
-| `WS` | `/ws/orientation` | Real-time IMU orientation at 2 Hz |
+- Linux (Ubuntu 20.04 / 22.04 / 24.04)
+- Python 3.10+
+- Intel RealSense D435I × 1–4, on USB 3.x ports
+- Optional: Unitree Go2 EDU on the LAN with [go2_record_pipeline](https://github.com/yuzhench/Harvard_AI_Robotics_go2_recording_system) running on its Jetson
+
+---
+
+## Related
+
+- [go2_record_pipeline](https://github.com/yuzhench/Harvard_AI_Robotics_go2_recording_system) — first-person (on-robot) data collection, to be paired with this repo for full synchronized capture
